@@ -32,11 +32,16 @@ local function isVolcanoExecutor()
     return false
 end
 
-if isVolcanoExecutor() then
-    pcall(function()
-        getgenv().SFAA_SCRIPT_SOURCE = pcall and game:HttpGet(SCRIPT_URL) or ""
-        print("✅ Volcano executor detected: captured script source for auto-reload")
-    end)
+if isVolcanoExecutor() and not getgenv().SFAA_CAPTURED_BY_VOLCANO then
+    -- Only capture once at manual execute-time to avoid broken captures during queued re-executes
+    local ok, src = pcall(function() return game:HttpGet(SCRIPT_URL) end)
+    if ok and type(src) == "string" and src ~= "" then
+        getgenv().SFAA_SCRIPT_SOURCE = src
+        getgenv().SFAA_CAPTURED_BY_VOLCANO = true
+        print("✅ Volcano executor detected: captured script source for auto-reload (execute-time)")
+    else
+        warn("⚠️ Volcano detected but failed to fetch script source at execute time")
+    end
 end
 
 LP.OnTeleport:Connect(function(State)
@@ -1694,15 +1699,14 @@ local function serverHop()
     task.wait(0.35)
     local scriptToQueue = getgenv().SFAA_SCRIPT_SOURCE
     if not scriptToQueue or scriptToQueue == "" then
-        warn("⚠️ Script source not found - attempting to capture current script")
-        local info = debug.getinfo(1, "S")
-        if info.source and info.source:sub(1,1) == "@" then
-            pcall(function()
-                scriptToQueue = readfile(info.source:sub(2))
-                getgenv().SFAA_SCRIPT_SOURCE = scriptToQueue
-            end)
-        end
+        -- Avoid attempting to capture the running script during a rejoin/queued execution because
+        -- it often fails or returns a broken source. Require manual execute on a Volcano executor
+        -- to set `getgenv().SFAA_SCRIPT_SOURCE`, or provide a local backup file `SFAA_AutoReload.lua`.
+        warn("⚠️ Script source not found; skipping capture on rejoin to avoid broken queues")
+    else
+        print("✅ Using captured script source for auto-reload and queuing")
     end
+
     -- Save settings, earnings and meta to executor-persistent storage so next server picks them up
     pcall(saveSettings)
     pcall(saveEarnings)
@@ -1710,33 +1714,34 @@ local function serverHop()
 
     local queueSuccess = false
     local queueCount = 0
+    -- Only call queuing / writefile if we have a non-empty captured script source
     pcall(function()
-        if queue_on_teleport then
-            queue_on_teleport(scriptToQueue or [[print("⚠️ SFAA failed to reload - script source missing")]])
+        if scriptToQueue and scriptToQueue ~= "" and queue_on_teleport then
+            queue_on_teleport(scriptToQueue)
             queueSuccess = true
             queueCount = queueCount + 1
             print("✅ Method 1: queue_on_teleport SUCCESS")
         end
     end)
     pcall(function()
-        if syn and syn.queue_on_teleport then
-            syn.queue_on_teleport(scriptToQueue or [[print("⚠️ SFAA failed to reload - script source missing")]])
+        if scriptToQueue and scriptToQueue ~= "" and syn and syn.queue_on_teleport then
+            syn.queue_on_teleport(scriptToQueue)
             queueSuccess = true
             queueCount = queueCount + 1
             print("✅ Method 2: syn.queue_on_teleport SUCCESS")
         end
     end)
     pcall(function()
-        if fluxus and fluxus.queue_on_teleport then
-            fluxus.queue_on_teleport(scriptToQueue or [[print("⚠️ SFAA failed to reload - script source missing")]])
+        if scriptToQueue and scriptToQueue ~= "" and fluxus and fluxus.queue_on_teleport then
+            fluxus.queue_on_teleport(scriptToQueue)
             queueSuccess = true
             queueCount = queueCount + 1
             print("✅ Method 3: fluxus.queue_on_teleport SUCCESS")
         end
     end)
     pcall(function()
-        if writefile then
-            writefile("SFAA_AutoReload.lua", scriptToQueue or [[print("⚠️ SFAA backup file empty")]])
+        if scriptToQueue and scriptToQueue ~= "" and writefile then
+            writefile("SFAA_AutoReload.lua", scriptToQueue)
             print("✅ Method 4: Saved to SFAA_AutoReload.lua")
         end
     end)
