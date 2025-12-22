@@ -593,9 +593,12 @@ local ArrestSettings = {
     -- High-bounty handling: if covered bounty is >= this threshold, delay server hop until they leave cover
     HighBountyThreshold = 40000,
     HighBountyCheckInterval = 2,
+    -- Option: stay in server if total server bounty is above this threshold
+    StayIfTotalBountyEnabled = false,
+    StayIfTotalBountyThreshold = 40000,
     -- If true, repeated deaths (loop death) will force an immediate server hop
     LoopDeathServerHop = true,
-}  
+}   
 
 -- Persisted settings file
 local SETTINGS_FILE = "SFAA_settings.json"
@@ -3010,7 +3013,7 @@ OtherSection.Parent = MainFrame
 OtherSection.BackgroundColor3 = Color3.fromRGB(20, 24, 32)
 OtherSection.BorderSizePixel = 0
 OtherSection.Position = UDim2.new(0, 15, 0, 412)
-OtherSection.Size = UDim2.new(1, -30, 0, 60)
+OtherSection.Size = UDim2.new(1, -30, 0, 92)
 
 local OtherSectionCorner = Instance.new("UICorner")
 OtherSectionCorner.CornerRadius = UDim.new(0, 8)
@@ -3073,6 +3076,54 @@ ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
 ServerHopLabel.TextSize = 11
 ServerHopLabel.TextXAlignment = Enum.TextXAlignment.Left
 
+-- Display total server bounty and controls to stay on high total bounty
+local TotalBountyLabel = Instance.new("TextLabel")
+TotalBountyLabel.Parent = OtherSection
+TotalBountyLabel.BackgroundTransparency = 1
+TotalBountyLabel.Position = UDim2.new(0, 32, 0, 56)
+TotalBountyLabel.Size = UDim2.new(1, -44, 0, 14)
+TotalBountyLabel.Font = Enum.Font.Gotham
+TotalBountyLabel.Text = "Total bounty: $0"
+TotalBountyLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+TotalBountyLabel.TextSize = 11
+TotalBountyLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local StayTotalToggle = Instance.new("TextButton")
+StayTotalToggle.Parent = OtherSection
+StayTotalToggle.BackgroundColor3 = (ArrestSettings and ArrestSettings.StayIfTotalBountyEnabled) and Color3.fromRGB(70, 180, 100) or Color3.fromRGB(60, 65, 80)
+StayTotalToggle.Position = UDim2.new(0, 12, 0, 56)
+StayTotalToggle.Size = UDim2.new(0, 14, 0, 14)
+StayTotalToggle.Text = ""
+StayTotalToggle.BorderSizePixel = 0
+StayTotalToggle.AutoButtonColor = false
+
+local StayTotalLabel = Instance.new("TextLabel")
+StayTotalLabel.Parent = OtherSection
+StayTotalLabel.BackgroundTransparency = 1
+StayTotalLabel.Position = UDim2.new(0, 32, 0, 52)
+StayTotalLabel.Size = UDim2.new(0, 140, 0, 18)
+StayTotalLabel.Font = Enum.Font.Gotham
+StayTotalLabel.Text = "Stay if total >"
+StayTotalLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+StayTotalLabel.TextSize = 11
+StayTotalLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local StayTotalInput = Instance.new("TextBox")
+StayTotalInput.Parent = OtherSection
+StayTotalInput.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+StayTotalInput.Position = UDim2.new(1, -150, 0, 52)
+StayTotalInput.Size = UDim2.new(0, 120, 0, 20)
+StayTotalInput.Font = Enum.Font.Gotham
+StayTotalInput.Text = tostring(ArrestSettings.StayIfTotalBountyThreshold)
+StayTotalInput.PlaceholderText = "40000"
+StayTotalInput.TextColor3 = Color3.fromRGB(180, 190, 210)
+StayTotalInput.TextSize = 11
+StayTotalInput.BorderSizePixel = 0
+
+local StayTotalCorner = Instance.new("UICorner")
+StayTotalCorner.CornerRadius = UDim.new(0, 6)
+StayTotalCorner.Parent = StayTotalInput
+
 -- Manual server hop button (instantly server hops when clicked)
 local ServerHopNowBtn = Instance.new("TextButton")
 ServerHopNowBtn.Parent = OtherSection
@@ -3106,6 +3157,31 @@ ServerHopNowBtn.MouseButton1Click:Connect(function()
         task.wait(0.5)
         ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
     end)
+end)
+
+-- StayTotal toggle behavior
+StayTotalToggle.MouseButton1Click:Connect(function()
+    ArrestSettings.StayIfTotalBountyEnabled = not ArrestSettings.StayIfTotalBountyEnabled
+    if ArrestSettings.StayIfTotalBountyEnabled then
+        StayTotalToggle.BackgroundColor3 = Color3.fromRGB(70, 180, 100)
+        print("🔒 Stay-on-high-total-bounty: ENABLED ($" .. tostring(ArrestSettings.StayIfTotalBountyThreshold) .. ")")
+    else
+        StayTotalToggle.BackgroundColor3 = Color3.fromRGB(60, 65, 80)
+        print("🔓 Stay-on-high-total-bounty: DISABLED")
+    end
+    saveSettings()
+end)
+
+StayTotalInput.FocusLost:Connect(function()
+    local n = tonumber(StayTotalInput.Text)
+    if n and n >= 0 then
+        ArrestSettings.StayIfTotalBountyThreshold = math.floor(n)
+        StayTotalInput.Text = tostring(ArrestSettings.StayIfTotalBountyThreshold)
+        saveSettings()
+        print("💾 Stay-if-total threshold set to $" .. tostring(ArrestSettings.StayIfTotalBountyThreshold))
+    else
+        StayTotalInput.Text = tostring(ArrestSettings.StayIfTotalBountyThreshold)
+    end
 end)
 
 local dragging, dragInput, dragStart, startPos
@@ -3218,7 +3294,18 @@ spawn(function()
         local avgSpeed = (ArrestSettings.CharacterFlySpeed + ArrestSettings.VehicleFlySpeed) / 2
         local percent = (avgSpeed / 300) * 100
         SpeedPercent.Text = string.format("%.2f%%", percent)
-        if ArrestSettings.ServerHopEnabled and arrestState.noTargetsStartTime then
+        -- Update total server bounty display
+        local totalServerB = getTotalServerBounty()
+        pcall(function()
+            TotalBountyLabel.Text = "Total bounty: $" .. formatNumber(math.floor(totalServerB))
+        end)
+
+        -- If we are actively delaying a hop, show that on the UI (and prefer this message)
+        if arrestState.hopDelayActive then
+            local reason = arrestState.hopDelayReason or "waiting"
+            ServerHopLabel.Text = "Serverhop: DELAYED (" .. tostring(reason) .. ")"
+            ServerHopLabel.TextColor3 = Color3.fromRGB(255, 180, 100)
+        elseif ArrestSettings.ServerHopEnabled and arrestState.noTargetsStartTime then
             local timeWithoutTargets = tick() - arrestState.noTargetsStartTime
             local remaining = ArrestSettings.ServerHopDelay - timeWithoutTargets
             if remaining > 0 then
