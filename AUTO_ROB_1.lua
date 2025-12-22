@@ -14,8 +14,30 @@ local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 
 -- Script URL (use raw pastebin link)
-getgenv().SFAA_SCRIPT_SOURCE = game:HttpGet("https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua")
 local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua"
+
+-- Helper: detect Volcano executor. Many executors provide identifyexecutor(); otherwise
+-- check for common Volcano globals. Only Volcano executors will auto-capture script source.
+local function isVolcanoExecutor()
+    local ok, name = pcall(function()
+        if typeof(identifyexecutor) == "function" then
+            return identifyexecutor()
+        end
+    end)
+    if ok and type(name) == "string" and name:lower():find("volcano") then
+        return true
+    end
+    if rawget(_G, "volcano") then return true end
+    if getgenv().VOLCANO or getgenv().isVolcano then return true end
+    return false
+end
+
+if isVolcanoExecutor() then
+    pcall(function()
+        getgenv().SFAA_SCRIPT_SOURCE = pcall and game:HttpGet(SCRIPT_URL) or ""
+        print("✅ Volcano executor detected: captured script source for auto-reload")
+    end)
+end
 
 LP.OnTeleport:Connect(function(State)
     if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
