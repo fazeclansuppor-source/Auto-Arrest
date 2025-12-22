@@ -16,20 +16,53 @@ local LP = Players.LocalPlayer
 -- Script URL (use raw pastebin link)
 local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua"
 
-LP.OnTeleport:Connect(function(State)
-    if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
-        TeleportCheck = true
-        local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
-        local success = pcall(function()
-            queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
+-- Safe OnTeleport setup: LocalPlayer may be nil when this script runs; poll until available and attach once
+local function setupOnTeleportQueue()
+    local function attach(lp)
+        if not lp or not lp.OnTeleport then return false end
+        pcall(function()
+            lp.OnTeleport:Connect(function(State)
+                if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
+                    TeleportCheck = true
+                    local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
+                    local ok = pcall(function()
+                        queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
+                    end)
+                    if ok then
+                        print("✅ SFAA queued for auto-execution in new server!")
+                    else
+                        warn("⚠️ Failed to queue SFAA for next server")
+                    end
+                end
+            end)
         end)
-        if success then
-            print("✅ SFAA queued for auto-execution in new server!")
-        else
-            warn("⚠️ Failed to queue SFAA for next server")
-        end
+        return true
     end
-end)
+
+    -- Try immediate attach
+    if Players.LocalPlayer and attach(Players.LocalPlayer) then return end
+
+    -- Otherwise wait for PlayerAdded and attach when local player appears
+    local conn
+    conn = Players.PlayerAdded:Connect(function(p)
+        if p == Players.LocalPlayer then
+            pcall(function() attach(p) end)
+            if conn then conn:Disconnect() end
+        end
+    end)
+
+    -- As a fallback, poll briefly for LocalPlayer to appear
+    task.spawn(function()
+        local timeout = 10
+        local t0 = tick()
+        while tick() - t0 < timeout do
+            if Players.LocalPlayer and attach(Players.LocalPlayer) then break end
+            task.wait(0.2)
+        end
+    end)
+end
+
+setupOnTeleportQueue()
 
 local P = game:GetService("Players")
 local W = game:GetService("Workspace")
@@ -3013,7 +3046,7 @@ OtherSection.Parent = MainFrame
 OtherSection.BackgroundColor3 = Color3.fromRGB(20, 24, 32)
 OtherSection.BorderSizePixel = 0
 OtherSection.Position = UDim2.new(0, 15, 0, 412)
-OtherSection.Size = UDim2.new(1, -30, 0, 92)
+OtherSection.Size = UDim2.new(1, -30, 0, 116)
 
 local OtherSectionCorner = Instance.new("UICorner")
 OtherSectionCorner.CornerRadius = UDim.new(0, 8)
@@ -3091,7 +3124,7 @@ TotalBountyLabel.TextXAlignment = Enum.TextXAlignment.Left
 local StayTotalToggle = Instance.new("TextButton")
 StayTotalToggle.Parent = OtherSection
 StayTotalToggle.BackgroundColor3 = (ArrestSettings and ArrestSettings.StayIfTotalBountyEnabled) and Color3.fromRGB(70, 180, 100) or Color3.fromRGB(60, 65, 80)
-StayTotalToggle.Position = UDim2.new(0, 12, 0, 56)
+StayTotalToggle.Position = UDim2.new(0, 12, 0, 74)
 StayTotalToggle.Size = UDim2.new(0, 14, 0, 14)
 StayTotalToggle.Text = ""
 StayTotalToggle.BorderSizePixel = 0
@@ -3100,7 +3133,7 @@ StayTotalToggle.AutoButtonColor = false
 local StayTotalLabel = Instance.new("TextLabel")
 StayTotalLabel.Parent = OtherSection
 StayTotalLabel.BackgroundTransparency = 1
-StayTotalLabel.Position = UDim2.new(0, 32, 0, 52)
+StayTotalLabel.Position = UDim2.new(0, 32, 0, 72)
 StayTotalLabel.Size = UDim2.new(0, 140, 0, 18)
 StayTotalLabel.Font = Enum.Font.Gotham
 StayTotalLabel.Text = "Stay if total >"
@@ -3111,7 +3144,7 @@ StayTotalLabel.TextXAlignment = Enum.TextXAlignment.Left
 local StayTotalInput = Instance.new("TextBox")
 StayTotalInput.Parent = OtherSection
 StayTotalInput.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
-StayTotalInput.Position = UDim2.new(1, -150, 0, 52)
+StayTotalInput.Position = UDim2.new(1, -150, 0, 72)
 StayTotalInput.Size = UDim2.new(0, 120, 0, 20)
 StayTotalInput.Font = Enum.Font.Gotham
 StayTotalInput.Text = tostring(ArrestSettings.StayIfTotalBountyThreshold)
@@ -3153,7 +3186,13 @@ ServerHopNowBtn.MouseButton1Click:Connect(function()
     ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
     task.spawn(function()
         print("🔄 Manual server hop triggered by user")
-        pcall(function() serverHop() end)
+        -- Hold SHIFT to force a hop immediately, ignoring delay logic
+        if UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift) then
+            print("⚠️ Force server hop (SHIFT held) - ignoring delay conditions")
+            pcall(function() serverHop() end)
+        else
+            pcall(function() tryQueueServerHopOrDelay("manual") end)
+        end
         task.wait(0.5)
         ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
     end)
@@ -3168,6 +3207,12 @@ StayTotalToggle.MouseButton1Click:Connect(function()
     else
         StayTotalToggle.BackgroundColor3 = Color3.fromRGB(60, 65, 80)
         print("🔓 Stay-on-high-total-bounty: DISABLED")
+        -- If we were delaying a hop due to total bounty, clear that delay
+        if arrestState.hopDelayActive and arrestState.hopDelayReason == "total" then
+            arrestState.hopDelayActive = false
+            arrestState.hopDelayReason = nil
+            print("⏹️ Cleared hop delay that was waiting on total server bounty")
+        end
     end
     saveSettings()
 end)
