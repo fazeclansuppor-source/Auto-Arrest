@@ -1749,7 +1749,6 @@ local function isTargetInVehicle()
     local hum = char:FindFirstChild("Humanoid")
     if not hum then return false end
     
-    -- Check if sitting (in vehicle)
     return hum.Sit or hum.SeatPart ~= nil
 end
 
@@ -1955,6 +1954,28 @@ local function findVehicleSeat(vehicle)
     return nil
 end
 
+-- Check if handcuffs are ACTUALLY equipped and ready
+local function areHandcuffsReady()
+    if not LP.Character then return false end
+    -- Check tool in hand
+    local tool = LP.Character:FindFirstChildOfClass("Tool")
+    if tool and tool.Name == "Handcuffs" then
+        arrestState.handcuffsEquipped = true
+        return true
+    end
+    -- Check backpack
+    local backpack = LP:FindFirstChild("Backpack")
+    if backpack then
+        local cuffs = backpack:FindFirstChild("Handcuffs")
+        if not cuffs then
+            arrestState.handcuffsEquipped = false
+            return false
+        end
+    end
+    return arrestState.handcuffsEquipped == true
+end
+
+-- IMPROVED: exitVehicle with smart handcuff waiting
 local function exitVehicle()
     local char = LP.Character
     if not char then return false end
@@ -2009,15 +2030,23 @@ local function exitVehicle()
         end
     end)
     
-    -- Equip handcuffs after exiting
-    if not arrestState.handcuffsEquipped then
-        print("🔫 Equipping handcuffs after vehicle exit...")
-        for i = 1, 3 do
-            equipHandcuffs()
-            task.wait(0.2)
-            if arrestState.handcuffsEquipped then
-                break
-            end
+    -- CRITICAL FIX: Wait for handcuffs before allowing E spam
+    print("🔫 Waiting for handcuffs to equip...")
+    
+    local equipStartTime = tick()
+    local maxEquipWait = 3 -- Maximum 3 seconds to wait for handcuffs
+    
+    -- Try to equip handcuffs multiple times
+    for i = 1, 5 do
+        if areHandcuffsReady() then
+            print("✅ Handcuffs ready! (attempt " .. i .. ")")
+            break
+        end
+        equipHandcuffs()
+        task.wait(0.3)
+        if tick() - equipStartTime > maxEquipWait then
+            print("⚠️ Handcuff equip timeout - proceeding anyway")
+            break
         end
     end
     
@@ -2116,14 +2145,22 @@ local function startECycle()
     eCycleThread = task.spawn(function()
         while arrestState.eHoldActive do
             if arrestState.phase == "ARRESTING" and arrestState.targetPlayer then
-                VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                task.wait(1.5)
-                VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-                for i = 1, 5 do
+                -- Only spam E if handcuffs are actually equipped
+                if areHandcuffsReady() then
                     VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                    task.wait(0.05)
+                    task.wait(1.5)
                     VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-                    task.wait(0.05)
+                    for i = 1, 5 do
+                        VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                        task.wait(0.05)
+                        VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+                        task.wait(0.05)
+                    end
+                else
+                    -- Handcuffs not ready - wait and attempt to equip
+                    print("⚠️ E-cycle paused - handcuffs not equipped")
+                    equipHandcuffs()
+                    task.wait(0.5)
                 end
             else
                 task.wait(0.1)
@@ -2275,43 +2312,135 @@ local function performInstantDrop(targetRoot, descendY, preferFullXZ)
     return success
 end
 
+-- Set proper network ownership for vehicle parts
+local function setVehicleNetworkOwnership(vehicle)
+    if not vehicle then return false end
+    local success = pcall(function()
+        local mainPart = vehicle:FindFirstChild("Engine") or vehicle:FindFirstChild("Body") or vehicle.PrimaryPart or vehicle:FindFirstChildWhichIsA("BasePart")
+        if mainPart then
+            if mainPart:CanSetNetworkOwnership() then
+                pcall(function() mainPart:SetNetworkOwner(LP) end)
+                print("✅ Claimed network ownership of vehicle")
+            end
+            for _, part in ipairs(vehicle:GetDescendants()) do
+                if part:IsA("BasePart") and part:CanSetNetworkOwnership() then
+                    pcall(function() part:SetNetworkOwner(LP) end)
+                end
+            end
+        end
+    end)
+    return success
+end
+
+-- Velocity-based vehicle movement (prevents lag-back)
+local function flyVehicleToPosition(vehicle, targetPos, speed)
+    if not vehicle then return false end
+    local root = getRoot(vehicle)
+    if not root then return false end
+    speed = speed or ArrestSettings.VehicleFlySpeed
+
+    -- Claim ownership first
+    pcall(function() setVehicleNetworkOwnership(vehicle) end)
+
+    local currentPos = root.Position
+    local distance = (targetPos - currentPos).Magnitude
+    if distance < 5 then
+        pcall(function()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            local bv = root:FindFirstChildOfClass("BodyVelocity")
+            if bv then bv:Destroy() end
+        end)
+        return true
+    end
+
+    local direction = (targetPos - currentPos).Unit
+    pcall(function()
+        root.Anchored = false
+        root.CFrame = CFrame.new(currentPos, currentPos + direction)
+        root.AssemblyLinearVelocity = direction * speed
+        root.AssemblyAngularVelocity = Vector3.zero
+        -- BodyVelocity backup
+        local bodyVel = root:FindFirstChildOfClass("BodyVelocity")
+        if not bodyVel then
+            bodyVel = Instance.new("BodyVelocity")
+            bodyVel.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            bodyVel.P = 1250
+            bodyVel.Parent = root
+        end
+        bodyVel.Velocity = direction * speed
+    end)
+
+    return false
+end
+
+-- Vehicle update rate limiter (prevent server rejection)
+local lastVehicleUpdate = 0
+local vehicleUpdateInterval = 0.05 -- 50ms between vehicle updates (20 updates/sec max)
+local function canUpdateVehicle()
+    local now = tick()
+    if now - lastVehicleUpdate < vehicleUpdateInterval then return false end
+    lastVehicleUpdate = now
+    return true
+end
+
+-- Vehicle-aware flyToPosition that uses vehicle-specific method when in a vehicle
 local function flyToPosition(targetPos, speed)
     local char = LP.Character
     if not char then return false end
     local veh = getVehicle()
-    local actualSpeed = veh and ArrestSettings.VehicleFlySpeed or ArrestSettings.CharacterFlySpeed
-    local root = veh and getRoot(veh) or char:FindFirstChild("HumanoidRootPart")
-    if not root then return false end
-    if not veh then
+    local isInVeh = veh ~= nil
+
+    if isInVeh then
+        if not canUpdateVehicle() then return false end
+        return flyVehicleToPosition(veh, targetPos, speed)
+    else
+        -- Character flying (original behavior)
+        local actualSpeed = speed or ArrestSettings.CharacterFlySpeed
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return false end
         local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then
-            pcall(function()
-                hum.PlatformStand = true
-            end)
+        if hum then pcall(function() hum.PlatformStand = true end) end
+        pcall(function() root.Anchored = false end)
+        local currentPos = root.Position
+        local distance = (targetPos - currentPos).Magnitude
+        if distance < 5 then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            return true
         end
+        local direction = (targetPos - currentPos).Unit
+        pcall(function()
+            root.CFrame = CFrame.new(currentPos, currentPos + direction)
+            root.AssemblyLinearVelocity = direction * actualSpeed
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+        return false
     end
-    pcall(function()
-        root.Anchored = false
-        if veh then
-            if root:CanSetNetworkOwnership() then
-                root:SetNetworkOwner(LP)
-            end
-        end
-    end)
-    local currentPos = root.Position
-    local distance = (targetPos - currentPos).Magnitude
-    if distance < 5 then
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-        return true
+end
+
+-- Diagnostic helper for vehicle state
+local function diagnoseVehicleState()
+    local veh = getVehicle()
+    if not veh then print("❌ No vehicle detected") return end
+    local root = getRoot(veh)
+    if not root then print("❌ No vehicle root part") return end
+    print("\n" .. string.rep("=", 50))
+    print("🚗 VEHICLE DIAGNOSTICS")
+    print(string.rep("=", 50))
+    print("Vehicle Name: " .. veh.Name)
+    print("Root Part: " .. root.Name)
+    print("Position: " .. tostring(root.Position))
+    print("Velocity: " .. tostring(root.AssemblyLinearVelocity))
+    print("Anchored: " .. tostring(root.Anchored))
+    local hasOwnership = root:CanSetNetworkOwnership()
+    print("Can Set Ownership: " .. tostring(hasOwnership))
+    if hasOwnership then
+        pcall(function() root:SetNetworkOwner(LP); print("✅ Set network owner to local player") end)
+    else
+        print("⚠️ Cannot set network ownership (might be locked)")
     end
-    local direction = (targetPos - currentPos).Unit
-    pcall(function()
-        root.CFrame = CFrame.new(currentPos, currentPos + direction)
-        root.AssemblyLinearVelocity = direction * actualSpeed
-        root.AssemblyAngularVelocity = Vector3.zero
-    end)
-    return false
+    print(string.rep("=", 50) .. "\n")
 end
 
 local function flyHorizontalToPosition(targetPos, maintainHeight)
