@@ -379,27 +379,27 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
                     end
                 end
             end)
-            task.wait(0.6)"
+    task.wait(0.6)
 
-            -- Update spawn data on server (refresh choices) before selecting Military Base
-            pcall(function()
-                local upd = game:GetService("ReplicatedStorage"):FindFirstChild("SpawnSelectionUpdateSpawnData")
-                if upd and upd.FireServer then
-                    upd:FireServer()
-                    print("🔁 SpawnSelectionUpdateSpawnData: fired")
-                end
-            end)
-            task.wait(0.25)
-
-            -- Now request Military Base spawn and load character
+    -- Update spawn data on server (refresh choices) before selecting Military Base
+    pcall(function()
+        local upd = game:GetService("ReplicatedStorage"):FindFirstChild("SpawnSelectionUpdateSpawnData")
+        if upd and upd.FireServer then
+            upd:FireServer()
+            print("🔁 SpawnSelectionUpdateSpawnData: fired")
+        end
+    end)
+    task.wait(0.25)
+    pcall(function()
+        local sel = game:GetService("ReplicatedStorage"):FindFirstChild("SpawnSelectionSelect")
+        if sel and sel.FireServer then
             pcall(function()
                 local args = {"Military Base"}
-                local sel = game:GetService("ReplicatedStorage"):FindFirstChild("SpawnSelectionSelect")
-                if sel and sel.FireServer then
-                    sel:FireServer(unpack(args))
-                    print("🔁 SpawnSelectionSelect: 'Military Base' requested")
-                end
+                sel:FireServer(unpack(args))
+                print("🔁 SpawnSelectionSelect: 'Military Base' requested")
             end)
+        end
+    end)
 
             task.wait(0.5)
             pcall(function() LP:LoadCharacter() end)
