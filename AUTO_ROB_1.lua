@@ -586,7 +586,13 @@ local ArrestSettings = {
     ServerHopEnabled = true, -- ENABLED BY DEFAULT
     ServerHopDelay = 2,
     AutoStartAfterHop = false,
-}
+    -- Stuck detection -> server hop if not moved more than X studs in Y seconds (horizontal only)
+    StuckServerHopDistance = 25,
+    StuckServerHopDuration = 8,
+    StuckServerHopCooldown = 30,
+    -- If true, repeated deaths (loop death) will force an immediate server hop
+    LoopDeathServerHop = true,
+} 
 
 -- Persisted settings file
 local SETTINGS_FILE = "SFAA_settings.json"
@@ -1767,13 +1773,13 @@ local function onCharacterAdded(character)
 
             local threshold = (ArrestSettings and ArrestSettings.DeathsBeforeServerHop) or 6
             if deathCount >= threshold then
-                if ArrestSettings.ServerHopEnabled then
-                    print("🔄 Death threshold reached (" .. tostring(deathCount) .. ") - server hopping to escape repeated kills")
+                if (ArrestSettings and ArrestSettings.LoopDeathServerHop) == false then
+                    print("⚠️ Death threshold reached (" .. tostring(deathCount) .. ") but LoopDeathServerHop disabled")
+                else
+                    print("🔄 Death threshold reached (" .. tostring(deathCount) .. ") - initiating server hop to escape repeated kills")
                     deathCount = 0
                     lastDeathTime = 0
                     task.spawn(function() pcall(serverHop) end)
-                else
-                    print("⚠️ Death threshold reached but ServerHop is disabled")
                 end
                 resetArrestState()
                 return
@@ -1851,6 +1857,43 @@ local function startArrestSystem()
             end
         end
         arrestState.lastPos = currentPos
+
+        -- Horizontal stuck detection: if the player has not moved more than StuckServerHopDistance
+        -- studs in the X/Z plane over StuckServerHopDuration seconds, trigger a server hop.
+        do
+            local stuckDist = (ArrestSettings and ArrestSettings.StuckServerHopDistance) or 25
+            local stuckDur = (ArrestSettings and ArrestSettings.StuckServerHopDuration) or 8
+            local cooldown = (ArrestSettings and ArrestSettings.StuckServerHopCooldown) or 30
+            if not arrestState.stuckAnchorPosXZ or not arrestState.stuckAnchorTime then
+                arrestState.stuckAnchorPosXZ = Vector3.new(currentPos.X, 0, currentPos.Z)
+                arrestState.stuckAnchorTime = tick()
+            else
+                local elapsed = tick() - arrestState.stuckAnchorTime
+                if elapsed >= stuckDur then
+                    local anchor = arrestState.stuckAnchorPosXZ
+                    local dx = currentPos.X - anchor.X
+                    local dz = currentPos.Z - anchor.Z
+                    local horizDist = math.sqrt(dx*dx + dz*dz)
+                    if horizDist <= stuckDist then
+                        if not arrestState.lastStuckHopTime or (tick() - arrestState.lastStuckHopTime) >= cooldown then
+                            print("⚠️ Stuck detected (moved " .. math.floor(horizDist) .. " studs in last " .. math.floor(elapsed) .. "s) — initiating server hop")
+                            arrestState.lastStuckHopTime = tick()
+                            -- reset death counters to avoid immediate death-triggered hops and ensure clean state
+                            deathCount = 0
+                            lastDeathTime = 0
+                            task.spawn(function() pcall(serverHop) end)
+                        else
+                            local left = math.ceil(cooldown - (tick() - arrestState.lastStuckHopTime))
+                            print("⚠️ Stuck detected but server hop on cooldown (" .. tostring(left) .. "s left)")
+                        end
+                    end
+                    -- reset anchor to start a fresh window
+                    arrestState.stuckAnchorPosXZ = Vector3.new(currentPos.X, 0, currentPos.Z)
+                    arrestState.stuckAnchorTime = tick()
+                end
+            end
+        end
+
         if arrestState.awaitingRespawnStart then
             local elapsed = tick() - arrestState.awaitingRespawnStart
             local movedSince = (currentPos - (arrestState.awaitingRespawnPos or currentPos)).Magnitude
@@ -2886,6 +2929,41 @@ ServerHopLabel.Text = "serverhop (4-8 slots left, disabled)"
 ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
 ServerHopLabel.TextSize = 11
 ServerHopLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Manual server hop button (instantly server hops when clicked)
+local ServerHopNowBtn = Instance.new("TextButton")
+ServerHopNowBtn.Parent = OtherSection
+ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
+ServerHopNowBtn.Position = UDim2.new(1, -92, 0, 6)
+ServerHopNowBtn.Size = UDim2.new(0, 80, 0, 24)
+ServerHopNowBtn.Font = Enum.Font.GothamBold
+ServerHopNowBtn.Text = "Serverhop Now"
+ServerHopNowBtn.TextColor3 = Color3.fromRGB(20, 20, 20)
+ServerHopNowBtn.TextSize = 11
+ServerHopNowBtn.BorderSizePixel = 0
+ServerHopNowBtn.AutoButtonColor = false
+
+local ServerHopNowCorner = Instance.new("UICorner")
+ServerHopNowCorner.CornerRadius = UDim.new(0, 6)
+ServerHopNowCorner.Parent = ServerHopNowBtn
+
+ServerHopNowBtn.MouseEnter:Connect(function()
+    ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 200, 64)
+end)
+ServerHopNowBtn.MouseLeave:Connect(function()
+    ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
+end)
+
+ServerHopNowBtn.MouseButton1Click:Connect(function()
+    -- Visual feedback
+    ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+    task.spawn(function()
+        print("🔄 Manual server hop triggered by user")
+        pcall(function() serverHop() end)
+        task.wait(0.5)
+        ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
+    end)
+end)
 
 local dragging, dragInput, dragStart, startPos
 
