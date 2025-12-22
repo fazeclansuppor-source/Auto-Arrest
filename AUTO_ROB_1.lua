@@ -122,18 +122,50 @@ getgenv().SFAA_RUNNING = true
 pcall(function() getgenv().SFAA_RUNNING_TS = os.time() end)
 startRunningHeartbeat()
 
-LP.OnTeleport:Connect(function(State)
-    if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
-        TeleportCheck = true
-        local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
-        local success = pcall(function()
-            queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
-        end)
-        if success then
-            print("✅ SFAA queued for auto-execution in new server!")
-        else
-            warn("⚠️ Failed to queue SFAA for next server")
+-- Safe OnTeleport connection with existence checks
+task.spawn(function()
+    local maxWait = 10
+    local waited = 0
+    
+    -- Wait for LocalPlayer to exist
+    while not LP or not LP.Parent do
+        if waited >= maxWait then
+            warn("⚠️ LocalPlayer not available after " .. maxWait .. "s - skipping OnTeleport setup")
+            return
         end
+        task.wait(0.5)
+        waited = waited + 0.5
+        LP = Players.LocalPlayer
+    end
+    
+    -- Additional small wait to ensure OnTeleport is available
+    task.wait(1)
+    
+    -- Safe connection with pcall
+    local success, err = pcall(function()
+        if LP and LP.OnTeleport then
+            LP.OnTeleport:Connect(function(State)
+                if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
+                    TeleportCheck = true
+                    local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
+                    local ok = pcall(function()
+                        queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
+                    end)
+                    if ok then
+                        print("✅ SFAA queued for auto-execution in new server!")
+                    else
+                        warn("⚠️ Failed to queue SFAA for next server")
+                    end
+                end
+            end)
+            print("✅ OnTeleport event connected successfully")
+        else
+            warn("⚠️ OnTeleport not available - auto-queue disabled")
+        end
+    end)
+    
+    if not success then
+        warn("⚠️ Failed to setup OnTeleport:", err)
     end
 end)
 
