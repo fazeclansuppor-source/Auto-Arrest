@@ -17,8 +17,15 @@ local LP = Players.LocalPlayer
 local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua"
 -- Store script source for server hopping (attempt to fetch immediately)
 pcall(function()
-    getgenv().SFAA_SCRIPT_SOURCE = game:HttpGet(SCRIPT_URL or "YOUR_SCRIPT_URL_HERE")
+    getgenv().SFAA_SCRIPT_SOURCE = game:HttpGet(SCRIPT_URL or "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua")
 end)
+
+-- Prevent multiple instances from running concurrently
+if getgenv().SFAA_RUNNING then
+    print("⚠️ SFAA is already running in this environment — aborting duplicate instance.")
+    return
+end
+getgenv().SFAA_RUNNING = true
 
 LP.OnTeleport:Connect(function(State)
     if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
@@ -1038,6 +1045,9 @@ local function deepCleanupBeforeHop()
     
     task.wait(0.2)
     print("✅ Deep cleanup complete")
+
+    -- Clear running flag so a fresh instance can start in the new server
+    pcall(function() getgenv().SFAA_RUNNING = false end)
 end
 
 -- Simplified script queueing (minimal approach)
@@ -2103,6 +2113,9 @@ local function cleanupBeforeServerHop()
     end)
 
     print("✅ Cleanup complete")
+
+    -- Clear running flag so a fresh instance can start (if desired)
+    pcall(function() getgenv().SFAA_RUNNING = false end)
 end
 
 -- Simplified queue function with better executor compatibility
@@ -3198,6 +3211,9 @@ local function stopArrestSystem()
     end)
     task.wait(0.2)
     print("✅ System fully stopped - movement restored!")
+
+    -- Clear running flag so a fresh instance can start later if needed
+    pcall(function() getgenv().SFAA_RUNNING = false end)
 end
 
 local function initializeCharacterConnection()
