@@ -1,5 +1,5 @@
 --[[
-    SFAA - SUPER FAST AUTO ARREST V8.0
+    SFAA - SUPER FAST AUTO ARREST V8.5
     AUTO-ENABLED with instant police team switch
     
     FEATURES:
@@ -181,7 +181,7 @@ local LP = P.LocalPlayer
 local Camera = W.CurrentCamera
 
 print("\n" .. string.rep("=", 70))
-print("🚔 SFAA V8.0 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
+print("🚔 SFAA V8.5 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
 print(string.rep("=", 70))
 
 -- ================= CONFIG =================
@@ -776,6 +776,8 @@ local ArrestSettings = {
     ShootInterval = 0.15,                    -- Time between shots (seconds)
     ShootRange = 200,                        -- Max range to shoot vehicles (studs)
     AutoSwitchWeapons = true,                -- Auto-switch between pistol and handcuffs
+    AutoHandcuffSpace = true,                 -- If pistol is not equipped, equip handcuffs and press Space every interval
+    SpacePressInterval = 1.0,                 -- Interval in seconds to press Space when not holding pistol
 }  
 
 -- Persisted settings file
@@ -980,12 +982,14 @@ local arrestState = {
     -- Players detected under cover are stored here so we can target them when they leave cover
     coverWatchlist = {},
     noTargetsStartTime = nil,
+    spacePressActive = false,
 } 
 
 -- Vehicle shooting runtime state
 local pistolEquipped = false
 local lastPistolShot = 0
 local shootingThread = nil
+local spacePressThread = nil
 
 --// MAIN CONNECTIONS //--
 local mainConnection = nil
@@ -2178,6 +2182,37 @@ local function stopECycle()
     VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
 end
 
+local function startAutoSpaceLoop()
+    if arrestState.spacePressActive then return end
+    arrestState.spacePressActive = true
+    spacePressThread = task.spawn(function()
+        while arrestState.spacePressActive do
+            if ArrestSettings.Enabled and not pistolEquipped then
+                -- Ensure handcuffs are equipped when pistol is not
+                pcall(function() equipHandcuffs() end)
+                -- Press Space once
+                pcall(function()
+                    VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                    task.wait(0.05)
+                    VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+                end)
+                task.wait(ArrestSettings.SpacePressInterval or 1)
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+end
+
+local function stopAutoSpaceLoop()
+    arrestState.spacePressActive = false
+    if spacePressThread then
+        task.cancel(spacePressThread)
+        spacePressThread = nil
+    end
+    pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game) end)
+end
+
 local function getRoot(model)
     if not model then return nil end
     if model:FindFirstChild("Engine") then return model.Engine end
@@ -2991,7 +3026,7 @@ local mainUpdateInterval = 0.03
 
 local function startArrestSystem()
     if mainConnection then return end
-    print("🚨 SFAA Started - V8.0")
+    print("🚨 SFAA Started - V8.5")
     print("💰 Bounty Filter: " .. (ArrestSettings.BountyFilterEnabled and "ACTIVE" or "DISABLED") .. " - Min bounty: " .. ArrestSettings.BountyThreshold)
     print("🎯 Target Mode: " .. ArrestSettings.TargetMode)
     print("🔄 Server Hop: " .. (ArrestSettings.ServerHopEnabled and "ENABLED (targets 4-8 slots)" or "DISABLED"))
@@ -3001,6 +3036,11 @@ local function startArrestSystem()
     print("🔫 Vehicle Shooting: " .. (ArrestSettings.ShootVehicles and "ENABLED" or "DISABLED"))
     if ArrestSettings.ShootVehicles then
         startVehicleShooting()
+    end
+
+    -- Start auto handcuff + Space press loop if enabled
+    if ArrestSettings.AutoHandcuffSpace then
+        startAutoSpaceLoop()
     end
 
     mainConnection = R.Heartbeat:Connect(function()
@@ -3763,6 +3803,9 @@ local function stopArrestSystem()
         stopVehicleShooting()
     end)
     pcall(function()
+        stopAutoSpaceLoop()
+    end)
+    pcall(function()
         local char = LP.Character
         if char then
             local hum = char:FindFirstChild("Humanoid")
@@ -3847,7 +3890,7 @@ Version.BackgroundTransparency = 1
 Version.Position = UDim2.new(0, 15, 0, 28)
 Version.Size = UDim2.new(1, -30, 0, 16)
 Version.Font = Enum.Font.Gotham
-Version.Text = "Super Fast Auto Arrest v8.0"
+Version.Text = "Super Fast Auto Arrest v8.5"
 Version.TextColor3 = Color3.fromRGB(140, 150, 170)
 Version.TextSize = 11
 Version.TextXAlignment = Enum.TextXAlignment.Left
@@ -4483,7 +4526,7 @@ spawn(function()
     end
 end)
 
-print("✅ SFAA V8.0 Loaded Successfully!")
+print("✅ SFAA V8.5 Loaded Successfully!")
 print("📱 Modern clean GUI active")
 print("⚡ All features operational")
 print("💰 Bounty filter: ENABLED (Min: $" .. ArrestSettings.BountyThreshold .. ")")
