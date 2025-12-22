@@ -16,53 +16,20 @@ local LP = Players.LocalPlayer
 -- Script URL (use raw pastebin link)
 local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua"
 
--- Safe OnTeleport setup: LocalPlayer may be nil when this script runs; poll until available and attach once
-local function setupOnTeleportQueue()
-    local function attach(lp)
-        if not lp or not lp.OnTeleport then return false end
-        pcall(function()
-            lp.OnTeleport:Connect(function(State)
-                if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
-                    TeleportCheck = true
-                    local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
-                    local ok = pcall(function()
-                        queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
-                    end)
-                    if ok then
-                        print("✅ SFAA queued for auto-execution in new server!")
-                    else
-                        warn("⚠️ Failed to queue SFAA for next server")
-                    end
-                end
-            end)
+LP.OnTeleport:Connect(function(State)
+    if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
+        TeleportCheck = true
+        local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
+        local success = pcall(function()
+            queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
         end)
-        return true
+        if success then
+            print("✅ SFAA queued for auto-execution in new server!")
+        else
+            warn("⚠️ Failed to queue SFAA for next server")
+        end
     end
-
-    -- Try immediate attach
-    if Players.LocalPlayer and attach(Players.LocalPlayer) then return end
-
-    -- Otherwise wait for PlayerAdded and attach when local player appears
-    local conn
-    conn = Players.PlayerAdded:Connect(function(p)
-        if p == Players.LocalPlayer then
-            pcall(function() attach(p) end)
-            if conn then conn:Disconnect() end
-        end
-    end)
-
-    -- As a fallback, poll briefly for LocalPlayer to appear
-    task.spawn(function()
-        local timeout = 10
-        local t0 = tick()
-        while tick() - t0 < timeout do
-            if Players.LocalPlayer and attach(Players.LocalPlayer) then break end
-            task.wait(0.2)
-        end
-    end)
-end
-
-setupOnTeleportQueue()
+end)
 
 local P = game:GetService("Players")
 local W = game:GetService("Workspace")
@@ -523,7 +490,7 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
             -- Reset death counter before hopping
             deathCount = 0
             lastDeathTime = 0
-            pcall(function() tryQueueServerHopOrDelay("spawn_attempts") end)
+            pcall(serverHop)
         else
             print("⚠️ Spawn attempts failed after " .. maxAttempts .. " attempts and ServerHop disabled")
         end
@@ -623,15 +590,9 @@ local ArrestSettings = {
     StuckServerHopDistance = 25,
     StuckServerHopDuration = 8,
     StuckServerHopCooldown = 30,
-    -- High-bounty handling: if covered bounty is >= this threshold, delay server hop until they leave cover
-    HighBountyThreshold = 40000,
-    HighBountyCheckInterval = 2,
-    -- Option: stay in server if total server bounty is above this threshold
-    StayIfTotalBountyEnabled = false,
-    StayIfTotalBountyThreshold = 40000,
     -- If true, repeated deaths (loop death) will force an immediate server hop
     LoopDeathServerHop = true,
-}   
+} 
 
 -- Persisted settings file
 local SETTINGS_FILE = "SFAA_settings.json"
@@ -1658,83 +1619,6 @@ local function displayAllBounties()
     print(string.rep("=", 60) .. "\n")
 end
 
--- High-bounty check helpers
-local function getTotalCoveredBounty()
-    local total = 0
-    local playersList = {}
-    for _, player in ipairs(P:GetPlayers()) do
-        if isTargetValid(player) then
-            local b = getPlayerBounty(player) or 0
-            if b > 0 and isPlayerUnderCover(player) then
-                total = total + b
-                table.insert(playersList, player)
-            end
-        end
-    end
-    return total, playersList
-end
-
--- Try to queue a server hop, but if a large amount of covered bounty exists, delay until those players leave cover
-local function tryQueueServerHopOrDelay(trigger)
-    trigger = trigger or "manual"
-    if not (ArrestSettings and ArrestSettings.ServerHopEnabled) then
-        print("⚠️ Server hop disabled - not hopping (" .. tostring(trigger) .. ")")
-        return false
-    end
-    local threshold = (ArrestSettings and ArrestSettings.HighBountyThreshold) or 40000
-    local totalCovered, playersList = getTotalCoveredBounty()
-    if totalCovered >= threshold and #playersList > 0 then
-        print("⚠️ High covered bounty detected: $" .. formatNumber(math.floor(totalCovered)) .. " >= $" .. tostring(threshold) .. " - delaying server hop until covered players leave cover")
-        -- show covered players and their bounties
-        do
-            local names = {}
-            for _, p in ipairs(playersList) do
-                table.insert(names, p.Name .. "($" .. tostring(getPlayerBounty(p) or 0) .. ")")
-            end
-            if #names > 0 then print("⏳ Waiting on covered players: " .. table.concat(names, ", ")) end
-        end
-        if arrestState.hopDelayActive then
-            print("⏳ Hop delay already active")
-            return false
-        end
-        arrestState.hopDelayActive = true
-        arrestState.hopDelayedPlayers = {}
-        for _, p in ipairs(playersList) do
-            arrestState.hopDelayedPlayers[p.UserId] = true
-        end
-        -- Cancel any active no-targets timer so we don't immediately requeue
-        arrestState.noTargetsStartTime = nil
-        task.spawn(function()
-            local interval = (ArrestSettings and ArrestSettings.HighBountyCheckInterval) or 2
-            while arrestState.hopDelayActive do
-                task.wait(interval)
-                local newTotal, newList = getTotalCoveredBounty()
-                if newTotal < threshold then
-                    print("✅ Covered bounty dropped below threshold ($" .. formatNumber(math.floor(newTotal)) .. ")")
-                    arrestState.hopDelayActive = false
-                    arrestState.hopDelayedPlayers = nil
-                    -- Prefer targeting players who left cover instead of hopping away immediately
-                    local wp, wdist = getUncoveredWatchedPlayer()
-                    if wp then
-                        print("🎯 Watched player left cover: " .. wp.Name .. " (" .. tostring(math.floor(wdist or 0)) .. " studs) - resuming engagement")
-                        arrestState.targetPlayer = wp
-                        arrestState.targetStartMoney = getPlayerMoney(wp) or 0
-                        arrestState.phase = "SCANNING"
-                        return
-                    end
-                    pcall(serverHop)
-                    return
-                else
-                    print("⏳ Still high covered bounty: $" .. formatNumber(math.floor(newTotal)) .. " - waiting...")
-                end
-            end
-        end)
-        return false
-    end
-    pcall(serverHop)
-    return true
-end
-
 local TeleportService = game:GetService("TeleportService")
 
 local function serverHop()
@@ -1946,7 +1830,7 @@ local function onCharacterAdded(character)
                     print("🔄 Death threshold reached (" .. tostring(deathCount) .. ") - initiating server hop to escape repeated kills")
                     deathCount = 0
                     lastDeathTime = 0
-                    task.spawn(function() pcall(function() tryQueueServerHopOrDelay("death_threshold") end) end)
+                    task.spawn(function() pcall(serverHop) end)
                 end
                 resetArrestState()
                 return
@@ -2048,7 +1932,7 @@ local function startArrestSystem()
                             -- reset death counters to avoid immediate death-triggered hops and ensure clean state
                             deathCount = 0
                             lastDeathTime = 0
-                            task.spawn(function() pcall(function() tryQueueServerHopOrDelay("stuck") end) end)
+                            task.spawn(function() pcall(serverHop) end)
                         else
                             local left = math.ceil(cooldown - (tick() - arrestState.lastStuckHopTime))
                             print("⚠️ Stuck detected but server hop on cooldown (" .. tostring(left) .. "s left)")
@@ -2240,8 +2124,8 @@ local function startArrestSystem()
                         else
                             local timeWithoutTargets = tick() - arrestState.noTargetsStartTime
                             if timeWithoutTargets >= ArrestSettings.ServerHopDelay then
-                                print("🔄 No targets for " .. ArrestSettings.ServerHopDelay .. "s - Server hop requested")
-                                tryQueueServerHopOrDelay("no_targets")
+                                print("🔄 No targets for " .. ArrestSettings.ServerHopDelay .. "s - Server hopping!")
+                                serverHop()
                             end
                         end
                     else
@@ -3046,7 +2930,7 @@ OtherSection.Parent = MainFrame
 OtherSection.BackgroundColor3 = Color3.fromRGB(20, 24, 32)
 OtherSection.BorderSizePixel = 0
 OtherSection.Position = UDim2.new(0, 15, 0, 412)
-OtherSection.Size = UDim2.new(1, -30, 0, 116)
+OtherSection.Size = UDim2.new(1, -30, 0, 60)
 
 local OtherSectionCorner = Instance.new("UICorner")
 OtherSectionCorner.CornerRadius = UDim.new(0, 8)
@@ -3109,54 +2993,6 @@ ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
 ServerHopLabel.TextSize = 11
 ServerHopLabel.TextXAlignment = Enum.TextXAlignment.Left
 
--- Display total server bounty and controls to stay on high total bounty
-local TotalBountyLabel = Instance.new("TextLabel")
-TotalBountyLabel.Parent = OtherSection
-TotalBountyLabel.BackgroundTransparency = 1
-TotalBountyLabel.Position = UDim2.new(0, 32, 0, 56)
-TotalBountyLabel.Size = UDim2.new(1, -44, 0, 14)
-TotalBountyLabel.Font = Enum.Font.Gotham
-TotalBountyLabel.Text = "Total bounty: $0"
-TotalBountyLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
-TotalBountyLabel.TextSize = 11
-TotalBountyLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-local StayTotalToggle = Instance.new("TextButton")
-StayTotalToggle.Parent = OtherSection
-StayTotalToggle.BackgroundColor3 = (ArrestSettings and ArrestSettings.StayIfTotalBountyEnabled) and Color3.fromRGB(70, 180, 100) or Color3.fromRGB(60, 65, 80)
-StayTotalToggle.Position = UDim2.new(0, 12, 0, 74)
-StayTotalToggle.Size = UDim2.new(0, 14, 0, 14)
-StayTotalToggle.Text = ""
-StayTotalToggle.BorderSizePixel = 0
-StayTotalToggle.AutoButtonColor = false
-
-local StayTotalLabel = Instance.new("TextLabel")
-StayTotalLabel.Parent = OtherSection
-StayTotalLabel.BackgroundTransparency = 1
-StayTotalLabel.Position = UDim2.new(0, 32, 0, 72)
-StayTotalLabel.Size = UDim2.new(0, 140, 0, 18)
-StayTotalLabel.Font = Enum.Font.Gotham
-StayTotalLabel.Text = "Stay if total >"
-StayTotalLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
-StayTotalLabel.TextSize = 11
-StayTotalLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-local StayTotalInput = Instance.new("TextBox")
-StayTotalInput.Parent = OtherSection
-StayTotalInput.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
-StayTotalInput.Position = UDim2.new(1, -150, 0, 72)
-StayTotalInput.Size = UDim2.new(0, 120, 0, 20)
-StayTotalInput.Font = Enum.Font.Gotham
-StayTotalInput.Text = tostring(ArrestSettings.StayIfTotalBountyThreshold)
-StayTotalInput.PlaceholderText = "40000"
-StayTotalInput.TextColor3 = Color3.fromRGB(180, 190, 210)
-StayTotalInput.TextSize = 11
-StayTotalInput.BorderSizePixel = 0
-
-local StayTotalCorner = Instance.new("UICorner")
-StayTotalCorner.CornerRadius = UDim.new(0, 6)
-StayTotalCorner.Parent = StayTotalInput
-
 -- Manual server hop button (instantly server hops when clicked)
 local ServerHopNowBtn = Instance.new("TextButton")
 ServerHopNowBtn.Parent = OtherSection
@@ -3186,47 +3022,10 @@ ServerHopNowBtn.MouseButton1Click:Connect(function()
     ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
     task.spawn(function()
         print("🔄 Manual server hop triggered by user")
-        -- Hold SHIFT to force a hop immediately, ignoring delay logic
-        if UIS:IsKeyDown(Enum.KeyCode.LeftShift) or UIS:IsKeyDown(Enum.KeyCode.RightShift) then
-            print("⚠️ Force server hop (SHIFT held) - ignoring delay conditions")
-            pcall(function() serverHop() end)
-        else
-            pcall(function() tryQueueServerHopOrDelay("manual") end)
-        end
+        pcall(function() serverHop() end)
         task.wait(0.5)
         ServerHopNowBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
     end)
-end)
-
--- StayTotal toggle behavior
-StayTotalToggle.MouseButton1Click:Connect(function()
-    ArrestSettings.StayIfTotalBountyEnabled = not ArrestSettings.StayIfTotalBountyEnabled
-    if ArrestSettings.StayIfTotalBountyEnabled then
-        StayTotalToggle.BackgroundColor3 = Color3.fromRGB(70, 180, 100)
-        print("🔒 Stay-on-high-total-bounty: ENABLED ($" .. tostring(ArrestSettings.StayIfTotalBountyThreshold) .. ")")
-    else
-        StayTotalToggle.BackgroundColor3 = Color3.fromRGB(60, 65, 80)
-        print("🔓 Stay-on-high-total-bounty: DISABLED")
-        -- If we were delaying a hop due to total bounty, clear that delay
-        if arrestState.hopDelayActive and arrestState.hopDelayReason == "total" then
-            arrestState.hopDelayActive = false
-            arrestState.hopDelayReason = nil
-            print("⏹️ Cleared hop delay that was waiting on total server bounty")
-        end
-    end
-    saveSettings()
-end)
-
-StayTotalInput.FocusLost:Connect(function()
-    local n = tonumber(StayTotalInput.Text)
-    if n and n >= 0 then
-        ArrestSettings.StayIfTotalBountyThreshold = math.floor(n)
-        StayTotalInput.Text = tostring(ArrestSettings.StayIfTotalBountyThreshold)
-        saveSettings()
-        print("💾 Stay-if-total threshold set to $" .. tostring(ArrestSettings.StayIfTotalBountyThreshold))
-    else
-        StayTotalInput.Text = tostring(ArrestSettings.StayIfTotalBountyThreshold)
-    end
 end)
 
 local dragging, dragInput, dragStart, startPos
@@ -3339,18 +3138,7 @@ spawn(function()
         local avgSpeed = (ArrestSettings.CharacterFlySpeed + ArrestSettings.VehicleFlySpeed) / 2
         local percent = (avgSpeed / 300) * 100
         SpeedPercent.Text = string.format("%.2f%%", percent)
-        -- Update total server bounty display
-        local totalServerB = getTotalServerBounty()
-        pcall(function()
-            TotalBountyLabel.Text = "Total bounty: $" .. formatNumber(math.floor(totalServerB))
-        end)
-
-        -- If we are actively delaying a hop, show that on the UI (and prefer this message)
-        if arrestState.hopDelayActive then
-            local reason = arrestState.hopDelayReason or "waiting"
-            ServerHopLabel.Text = "Serverhop: DELAYED (" .. tostring(reason) .. ")"
-            ServerHopLabel.TextColor3 = Color3.fromRGB(255, 180, 100)
-        elseif ArrestSettings.ServerHopEnabled and arrestState.noTargetsStartTime then
+        if ArrestSettings.ServerHopEnabled and arrestState.noTargetsStartTime then
             local timeWithoutTargets = tick() - arrestState.noTargetsStartTime
             local remaining = ArrestSettings.ServerHopDelay - timeWithoutTargets
             if remaining > 0 then
