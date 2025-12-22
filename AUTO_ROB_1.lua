@@ -5,7 +5,7 @@
     FEATURES:
     - Auto-switches to Police team on startup
     - Auto-starts arrest system immediately
-    - Server hop DISABLED by default. HIII
+    - Server hop DISABLED by default space jam
 ]]
 
 --// AUTO-EXECUTE ON SERVER HOP //--
@@ -19,6 +19,60 @@ local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto
 pcall(function()
     getgenv().SFAA_SCRIPT_SOURCE = game:HttpGet(SCRIPT_URL or "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua")
 end)
+
+-- Auto-sync helper: ensures the local auto-reload backup file matches the current script source
+local AUTO_RELOAD_FILENAME = "SFAA_AutoReload.lua"
+local function syncAutoReloadFile(scriptSource)
+    if not scriptSource or scriptSource == "" then
+        return false
+    end
+    local existing = nil
+    local gotExisting = false
+    pcall(function()
+        if isfile and readfile and isfile(AUTO_RELOAD_FILENAME) then
+            existing = readfile(AUTO_RELOAD_FILENAME)
+            gotExisting = true
+        elseif syn and syn.read_file and syn.file_exists and syn.file_exists(AUTO_RELOAD_FILENAME) then
+            existing = syn.read_file(AUTO_RELOAD_FILENAME)
+            gotExisting = true
+        elseif getgenv().SFAA_AUTO_RELOAD then
+            existing = getgenv().SFAA_AUTO_RELOAD
+            gotExisting = true
+        end
+    end)
+
+    if gotExisting and existing == scriptSource then
+        print("✅ Auto-reload file is up-to-date: " .. AUTO_RELOAD_FILENAME)
+        return true
+    end
+
+    -- Try to write/update file
+    local wrote = false
+    pcall(function()
+        if writefile then
+            writefile(AUTO_RELOAD_FILENAME, scriptSource)
+            wrote = true
+        elseif syn and syn.write_file then
+            syn.write_file(AUTO_RELOAD_FILENAME, scriptSource)
+            wrote = true
+        else
+            -- No filesystem available - store in global fallback for some executors
+            getgenv().SFAA_AUTO_RELOAD = scriptSource
+            wrote = false
+        end
+    end)
+
+    if wrote then
+        print("✅ Updated auto-reload file: " .. AUTO_RELOAD_FILENAME)
+    else
+        if getgenv().SFAA_AUTO_RELOAD == scriptSource then
+            print("✅ Auto-reload content updated in memory fallback")
+        else
+            warn("⚠️ Could not update auto-reload file (no file API) - stored in memory if possible")
+        end
+    end
+    return wrote
+end
 
 -- Single-instance guard with heartbeat (prevents stale flags across teleports)
 local RUNNING_STALE_THRESHOLD = 20 -- seconds
@@ -2264,6 +2318,9 @@ local function serverHop()
 
     -- Queue script for next server
     queueScriptForNextServer()
+
+    -- Ensure auto-reload backup matches the current captured script
+    pcall(function() syncAutoReloadFile(scriptToQueue or getgenv().SFAA_SCRIPT_SOURCE) end)
 
     task.wait(0.5)
 
