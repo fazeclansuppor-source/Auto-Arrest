@@ -612,6 +612,79 @@ end
 
 --// ARREST STATE //--
 loadSettings()
+
+-- Earnings persistence (across server hops)
+local EARNINGS_FILE = "SFAA_earnings.json"
+local earningsData = {}
+
+local function saveEarnings()
+    local ok, err = pcall(function()
+        local json = HttpService:JSONEncode(earningsData)
+        if writefile then
+            writefile(EARNINGS_FILE, json)
+        elseif syn and syn.write_file then
+            syn.write_file(EARNINGS_FILE, json)
+        else
+            -- Fallback to global table for executors without file APIs
+            getgenv().SFAA_EARNINGS = json
+        end
+    end)
+    if not ok then warn("⚠️ saveEarnings failed:", err) end
+end
+
+local function loadEarnings()
+    local success, json
+    if isfile and readfile and isfile(EARNINGS_FILE) then
+        success, json = pcall(function() return readfile(EARNINGS_FILE) end)
+    elseif syn and syn.read_file and syn.file_exists and syn.file_exists(EARNINGS_FILE) then
+        success, json = pcall(function() return syn.read_file(EARNINGS_FILE) end)
+    elseif getgenv().SFAA_EARNINGS then
+        success, json = true, getgenv().SFAA_EARNINGS
+    end
+    if success and type(json) == "string" and json ~= "" then
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(json) end)
+        if ok and type(decoded) == "table" then
+            earningsData = decoded
+            print("✅ Loaded earnings history (" .. tostring(#earningsData) .. " entries)")
+        end
+    end
+end
+
+local function recordEarning(amount)
+    if not amount or amount <= 0 then return end
+    table.insert(earningsData, {time = os.time(), amount = amount})
+    -- prune to last 1000 entries to avoid unbounded file growth
+    if #earningsData > 1000 then
+        for i = 1, (#earningsData - 1000) do table.remove(earningsData, 1) end
+    end
+    saveEarnings()
+    print("💵 Recorded earning: $" .. tostring(amount) .. " (total entries: " .. tostring(#earningsData) .. ")")
+end
+
+local function computeHourlyRate(windowSeconds)
+    windowSeconds = windowSeconds or 3600
+    local now = os.time()
+    local sum = 0
+    local earliest = nil
+    local count = 0
+    for _, e in ipairs(earningsData) do
+        if e and e.time and e.amount then
+            local age = now - e.time
+            if age <= windowSeconds then
+                sum = sum + e.amount
+                count = count + 1
+                earliest = earliest or e.time
+            end
+        end
+    end
+    if count == 0 then return nil, count end
+    local duration = math.max(1, now - earliest)
+    local perHour = (sum / duration) * 3600
+    return perHour, count
+end
+
+loadEarnings()
+
 local arrestState = {
     active = false,
     targetPlayer = nil,
@@ -1442,6 +1515,10 @@ local function serverHop()
             end)
         end
     end
+    -- Save settings and earnings to executor-persistent storage so next server picks them up
+    pcall(saveSettings)
+    pcall(saveEarnings)
+
     local queueSuccess = false
     local queueCount = 0
     pcall(function()
@@ -1747,7 +1824,9 @@ local function startArrestSystem()
         end)
         local currentLocalMoney = getMoney()
         if arrestState.prevLocalMoney and currentLocalMoney > arrestState.prevLocalMoney then
-            print("💰 Earnings detected (money increased) - retargeting")
+            local delta = currentLocalMoney - arrestState.prevLocalMoney
+            print("💰 Earnings detected (" .. ("+" .. formatNumber(delta)) .. ") - retargeting")
+            pcall(function() recordEarning(delta) end)
             if arrestState.targetPlayer then
                 arrestState.recentTargets[arrestState.targetPlayer.UserId] = tick() + 10
             end
@@ -2709,6 +2788,17 @@ ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
 ServerHopLabel.TextSize = 11
 ServerHopLabel.TextXAlignment = Enum.TextXAlignment.Left
 
+local EarningsLabel = Instance.new("TextLabel")
+EarningsLabel.Parent = OtherSection
+EarningsLabel.BackgroundTransparency = 1
+EarningsLabel.Position = UDim2.new(0, 32, 0, 10)
+EarningsLabel.Size = UDim2.new(1, -44, 0, 18)
+EarningsLabel.Font = Enum.Font.Gotham
+EarningsLabel.Text = "Est $/hr: calculating..."
+EarningsLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+EarningsLabel.TextSize = 11
+EarningsLabel.TextXAlignment = Enum.TextXAlignment.Left
+
 local dragging, dragInput, dragStart, startPos
 
 MainFrame.InputBegan:Connect(function(input)
@@ -2832,6 +2922,15 @@ spawn(function()
         else
             ServerHopLabel.Text = "serverhop (disabled by default)"
             ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+        end
+
+        -- Update earnings rate display (last 1 hour by default)
+        local hourly, samples = computeHourlyRate(3600)
+        if hourly then
+            local rounded = math.floor(hourly + 0.5)
+            EarningsLabel.Text = "Est $/hr: $" .. formatNumber(rounded) .. " (" .. tostring(samples) .. " samples)"
+        else
+            EarningsLabel.Text = "Est $/hr: calculating..."
         end
     end
 end)
