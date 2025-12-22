@@ -490,7 +490,7 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
             -- Reset death counter before hopping
             deathCount = 0
             lastDeathTime = 0
-            pcall(serverHop)
+            pcall(function() tryQueueServerHopOrDelay("spawn_attempts") end)
         else
             print("⚠️ Spawn attempts failed after " .. maxAttempts .. " attempts and ServerHop disabled")
         end
@@ -590,9 +590,12 @@ local ArrestSettings = {
     StuckServerHopDistance = 25,
     StuckServerHopDuration = 8,
     StuckServerHopCooldown = 30,
+    -- High-bounty handling: if covered bounty is >= this threshold, delay server hop until they leave cover
+    HighBountyThreshold = 40000,
+    HighBountyCheckInterval = 2,
     -- If true, repeated deaths (loop death) will force an immediate server hop
     LoopDeathServerHop = true,
-} 
+}  
 
 -- Persisted settings file
 local SETTINGS_FILE = "SFAA_settings.json"
@@ -1619,6 +1622,83 @@ local function displayAllBounties()
     print(string.rep("=", 60) .. "\n")
 end
 
+-- High-bounty check helpers
+local function getTotalCoveredBounty()
+    local total = 0
+    local playersList = {}
+    for _, player in ipairs(P:GetPlayers()) do
+        if isTargetValid(player) then
+            local b = getPlayerBounty(player) or 0
+            if b > 0 and isPlayerUnderCover(player) then
+                total = total + b
+                table.insert(playersList, player)
+            end
+        end
+    end
+    return total, playersList
+end
+
+-- Try to queue a server hop, but if a large amount of covered bounty exists, delay until those players leave cover
+local function tryQueueServerHopOrDelay(trigger)
+    trigger = trigger or "manual"
+    if not (ArrestSettings and ArrestSettings.ServerHopEnabled) then
+        print("⚠️ Server hop disabled - not hopping (" .. tostring(trigger) .. ")")
+        return false
+    end
+    local threshold = (ArrestSettings and ArrestSettings.HighBountyThreshold) or 40000
+    local totalCovered, playersList = getTotalCoveredBounty()
+    if totalCovered >= threshold and #playersList > 0 then
+        print("⚠️ High covered bounty detected: $" .. formatNumber(math.floor(totalCovered)) .. " >= $" .. tostring(threshold) .. " - delaying server hop until covered players leave cover")
+        -- show covered players and their bounties
+        do
+            local names = {}
+            for _, p in ipairs(playersList) do
+                table.insert(names, p.Name .. "($" .. tostring(getPlayerBounty(p) or 0) .. ")")
+            end
+            if #names > 0 then print("⏳ Waiting on covered players: " .. table.concat(names, ", ")) end
+        end
+        if arrestState.hopDelayActive then
+            print("⏳ Hop delay already active")
+            return false
+        end
+        arrestState.hopDelayActive = true
+        arrestState.hopDelayedPlayers = {}
+        for _, p in ipairs(playersList) do
+            arrestState.hopDelayedPlayers[p.UserId] = true
+        end
+        -- Cancel any active no-targets timer so we don't immediately requeue
+        arrestState.noTargetsStartTime = nil
+        task.spawn(function()
+            local interval = (ArrestSettings and ArrestSettings.HighBountyCheckInterval) or 2
+            while arrestState.hopDelayActive do
+                task.wait(interval)
+                local newTotal, newList = getTotalCoveredBounty()
+                if newTotal < threshold then
+                    print("✅ Covered bounty dropped below threshold ($" .. formatNumber(math.floor(newTotal)) .. ")")
+                    arrestState.hopDelayActive = false
+                    arrestState.hopDelayedPlayers = nil
+                    -- Prefer targeting players who left cover instead of hopping away immediately
+                    local wp, wdist = getUncoveredWatchedPlayer()
+                    if wp then
+                        print("🎯 Watched player left cover: " .. wp.Name .. " (" .. tostring(math.floor(wdist or 0)) .. " studs) - resuming engagement")
+                        arrestState.targetPlayer = wp
+                        arrestState.targetStartMoney = getPlayerMoney(wp) or 0
+                        arrestState.phase = "SCANNING"
+                        return
+                    end
+                    pcall(serverHop)
+                    return
+                else
+                    print("⏳ Still high covered bounty: $" .. formatNumber(math.floor(newTotal)) .. " - waiting...")
+                end
+            end
+        end)
+        return false
+    end
+    pcall(serverHop)
+    return true
+end
+
 local TeleportService = game:GetService("TeleportService")
 
 local function serverHop()
@@ -1830,7 +1910,7 @@ local function onCharacterAdded(character)
                     print("🔄 Death threshold reached (" .. tostring(deathCount) .. ") - initiating server hop to escape repeated kills")
                     deathCount = 0
                     lastDeathTime = 0
-                    task.spawn(function() pcall(serverHop) end)
+                    task.spawn(function() pcall(function() tryQueueServerHopOrDelay("death_threshold") end) end)
                 end
                 resetArrestState()
                 return
@@ -1932,7 +2012,7 @@ local function startArrestSystem()
                             -- reset death counters to avoid immediate death-triggered hops and ensure clean state
                             deathCount = 0
                             lastDeathTime = 0
-                            task.spawn(function() pcall(serverHop) end)
+                            task.spawn(function() pcall(function() tryQueueServerHopOrDelay("stuck") end) end)
                         else
                             local left = math.ceil(cooldown - (tick() - arrestState.lastStuckHopTime))
                             print("⚠️ Stuck detected but server hop on cooldown (" .. tostring(left) .. "s left)")
@@ -2124,8 +2204,8 @@ local function startArrestSystem()
                         else
                             local timeWithoutTargets = tick() - arrestState.noTargetsStartTime
                             if timeWithoutTargets >= ArrestSettings.ServerHopDelay then
-                                print("🔄 No targets for " .. ArrestSettings.ServerHopDelay .. "s - Server hopping!")
-                                serverHop()
+                                print("🔄 No targets for " .. ArrestSettings.ServerHopDelay .. "s - Server hop requested")
+                                tryQueueServerHopOrDelay("no_targets")
                             end
                         end
                     else
