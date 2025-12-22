@@ -46,6 +46,11 @@ print("\n" .. string.rep("=", 70))
 print("🚔 SFAA V8.0 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
 print(string.rep("=", 70))
 
+-- Safety: wait a short period at script start so the client and PlayerGui can fully initialize
+print("⏳ Waiting 6s for client to initialize before starting...")
+task.wait(6)
+print("✅ Initial wait complete, proceeding...")
+
 --// SIMPLE GUI BUTTON CLICKER - NO REMOTES //--
 local function getCurrentTeam()
     if LP.Team then return LP.Team.Name end
