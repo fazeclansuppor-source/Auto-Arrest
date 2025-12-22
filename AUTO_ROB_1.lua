@@ -344,13 +344,37 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
             -- Ensure we have a small pause; prevent rapid-fire killing
             task.wait(0.2)
 
-            -- Force death first so spawn selection menu will be available
+            -- Before forcing death, re-check position and apply a death cooldown to avoid rapid repeated kills
             pcall(function()
-                if LP.Character and LP.Character:FindFirstChild("Humanoid") then
-                    LP.Character.Humanoid.Health = 0
+                if LP.Character then
+                    local root = LP.Character:FindFirstChild("HumanoidRootPart")
+                    local hum = LP.Character:FindFirstChild("Humanoid")
+                    if root and hum then
+                        -- If we're already at Military Base, stop attempting to force death
+                        if isAtMilitaryBase(root.Position) then
+                            print("✅ Already at Military Base — aborting forced death")
+                            lastForcedDeathTime = tick()
+                            return true
+                        end
+                        local now = tick()
+                        local cooldown = (ArrestSettings and ArrestSettings.SpawnDeathCooldown) or 3
+                        local since = now - (lastForcedDeathTime or 0)
+                        if since < cooldown then
+                            local rem = cooldown - since
+                            print("⏳ Death cooldown active: waiting " .. string.format("%.1f", rem) .. "s before forced death")
+                            task.wait(rem)
+                        end
+                        if hum.Health > 0 then
+                            hum.Health = 0
+                            lastForcedDeathTime = tick()
+                            print("💀 Forced death to trigger spawn menu")
+                        else
+                            print("⚠️ Humanoid already dead; skipping forced death")
+                        end
+                    end
                 end
             end)
-            task.wait(0.6)
+            task.wait(0.6)"
 
             -- Update spawn data on server (refresh choices) before selecting Military Base
             pcall(function()
@@ -394,10 +418,33 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
                         print("✅ Spawned at Military Base after attempt " .. attempt)
                         return true
                     else
-                        print("⚠️ Not close enough to military base; killing and retrying...")
+                        print("⚠️ Not close enough to military base; attempting forced death and retry...")
                         pcall(function()
-                            if LP.Character and LP.Character:FindFirstChild("Humanoid") then
-                                LP.Character.Humanoid.Health = 0
+                            if LP.Character then
+                                local root = LP.Character:FindFirstChild("HumanoidRootPart")
+                                local hum = LP.Character:FindFirstChild("Humanoid")
+                                if root and hum then
+                                    if isAtMilitaryBase(root.Position) then
+                                        print("✅ After load: At Military Base — aborting further attempts")
+                                        lastForcedDeathTime = tick()
+                                        return true
+                                    end
+                                    local now = tick()
+                                    local cooldown = (ArrestSettings and ArrestSettings.SpawnDeathCooldown) or 3
+                                    local since = now - (lastForcedDeathTime or 0)
+                                    if since < cooldown then
+                                        local rem = cooldown - since
+                                        print("⏳ Death cooldown active: waiting " .. string.format("%.1f", rem) .. "s before forced death")
+                                        task.wait(rem)
+                                    end
+                                    if hum.Health > 0 then
+                                        hum.Health = 0
+                                        lastForcedDeathTime = tick()
+                                        print("💀 Forced death to retry spawn")
+                                    else
+                                        print("⚠️ Humanoid already dead; skipping forced death")
+                                    end
+                                end
                             end
                         end)
                         task.wait(currentDelay)
@@ -428,7 +475,15 @@ end
 -- SWITCH TO POLICE IMMEDIATELY AT STARTUP
 print("⚡ AUTO-SWITCHING TO POLICE TEAM...")
 clickPoliceButton()
-task.wait(2)
+-- Wait up to 6s for the team change to apply to avoid running spawn logic too early
+local switchTimeout = 6
+local switchStart = tick()
+while tick() - switchStart < switchTimeout do
+    if LP.Team and (LP.Team.Name == "Police" or LP.Team.Name == "Cop") then break end
+    task.wait(0.2)
+end
+-- extra small settle wait
+task.wait(0.5)
 print("✅ Team switch complete - checking spawn location...")
 
 -- Check if spawned at military base on startup
@@ -482,6 +537,7 @@ local ArrestSettings = {
     SpawnAttemptInitialDelay = 2.5, -- initial delay between spawn attempts
     SpawnAttemptBackoff = 1.0, -- incremental backoff added per attempt
     SpawnAttemptSettleTime = 1.0, -- wait after LoadCharacter before checking position
+    SpawnDeathCooldown = 3, -- seconds to wait between forced deaths to prevent rapid respawns
     ServerHopEnabled = true, -- ENABLED BY DEFAULT
     ServerHopDelay = 2,
     AutoStartAfterHop = false,
@@ -568,6 +624,8 @@ local characterConnection = nil
 
 -- Prevent overlapping spawn attempts
 local spawnAttemptInProgress = false
+-- Track last forced death time to prevent rapid repeated killing
+local lastForcedDeathTime = 0
 
 --// UTILITY FUNCTIONS //--
 local function getMoney()
@@ -1475,7 +1533,7 @@ local function onCharacterAdded(character)
     local root = character:WaitForChild("HumanoidRootPart")
     local hum = character:WaitForChild("Humanoid")
     
-    task.wait(2) -- Wait for spawn to complete
+    task.wait(6) -- Wait longer for spawn to complete and client to fully initialize (helps avoid being wrong team/crim)
     
     -- Check if spawned at military base
     local spawnPos = root.Position
@@ -1515,6 +1573,7 @@ local function onCharacterAdded(character)
     end
     if hum then
         deathConnection = hum.Died:Connect(function()
+            lastForcedDeathTime = tick()
             print("💀 Player died - attempting to respawn at Military Base repeatedly...")
             -- Spawn attempts run in a background thread so we don't block the death event
             task.spawn(function()
