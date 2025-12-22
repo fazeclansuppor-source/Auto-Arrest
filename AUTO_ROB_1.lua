@@ -15,6 +15,10 @@ local LP = Players.LocalPlayer
 
 -- Script URL (use raw pastebin link)
 local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua"
+-- Store script source for server hopping (attempt to fetch immediately)
+pcall(function()
+    getgenv().SFAA_SCRIPT_SOURCE = game:HttpGet(SCRIPT_URL or "YOUR_SCRIPT_URL_HERE")
+end)
 
 LP.OnTeleport:Connect(function(State)
     if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
@@ -814,6 +818,11 @@ local lastForcedDeathTime = 0
 -- Track recent death counts to decide when to server-hop
 local deathCount = 0
 local lastDeathTime = 0
+
+-- Server hop guards and cooldowns
+local serverHopInProgress = false
+local lastServerHopAttempt = 0
+local SERVER_HOP_COOLDOWN = 10 -- Prevent rapid consecutive hops
 
 --// UTILITY FUNCTIONS //--
 local function getMoney()
@@ -1653,9 +1662,172 @@ end
 
 local TeleportService = game:GetService("TeleportService")
 
+-- Cleanup helper to safely stop the script before teleporting
+local function cleanupBeforeServerHop()
+    print("🧹 Cleaning up before server hop...")
+    -- Stop all systems
+    ArrestSettings.Enabled = false
+
+    -- Disconnect all connections
+    pcall(function()
+        if mainConnection then
+            mainConnection:Disconnect()
+            mainConnection = nil
+        end
+    end)
+
+    pcall(function()
+        if deathConnection then
+            deathConnection:Disconnect()
+            deathConnection = nil
+        end
+    end)
+
+    pcall(function()
+        if characterConnection then
+            characterConnection:Disconnect()
+            characterConnection = nil
+        end
+    end)
+
+    pcall(function()
+        if eCycleThread then
+            task.cancel(eCycleThread)
+            eCycleThread = nil
+        end
+    end)
+
+    pcall(function()
+        if equipSpamThread then
+            task.cancel(equipSpamThread)
+            equipSpamThread = nil
+        end
+    end)
+
+    -- Stop all loops
+    pcall(stopECycle)
+    pcall(stopEquipSpam)
+
+    -- Reset camera
+    pcall(function()
+        Camera.CameraType = Enum.CameraType.Custom
+        local char = LP.Character
+        if char then
+            local hum = char:FindFirstChild("Humanoid")
+            if hum then
+                Camera.CameraSubject = hum
+            end
+        end
+    end)
+
+    -- Clear state
+    arrestState = {
+        active = false,
+        targetPlayer = nil,
+        phase = "SCANNING",
+        recentTargets = {},
+        coverWatchlist = {},
+    }
+
+    -- Save data
+    pcall(saveSettings)
+    pcall(saveEarnings)
+    pcall(saveMeta)
+
+    -- Force garbage collection
+    pcall(function()
+        for i = 1, 3 do
+            collectgarbage("collect")
+            task.wait(0.05)
+        end
+    end)
+
+    print("✅ Cleanup complete")
+end
+
+-- Simplified queue function with better executor compatibility
+local function queueScriptForNextServer()
+    local scriptSource = getgenv().SFAA_SCRIPT_SOURCE
+
+    if not scriptSource or scriptSource == "" then
+        warn("⚠️ Script source not found - cannot queue for next server")
+        return false
+    end
+
+    local queueSuccess = false
+    local attempts = 0
+
+    -- Method 1: Standard queue_on_teleport (most executors)
+    if queue_on_teleport then
+        pcall(function()
+            queue_on_teleport(scriptSource)
+            queueSuccess = true
+            attempts = attempts + 1
+            print("✅ Queued via queue_on_teleport")
+        end)
+    end
+
+    -- Method 2: Syn X compatibility
+    if syn and syn.queue_on_teleport then
+        pcall(function()
+            syn.queue_on_teleport(scriptSource)
+            queueSuccess = true
+            attempts = attempts + 1
+            print("✅ Queued via syn.queue_on_teleport")
+        end)
+    end
+
+    -- Method 3: Fluxus compatibility
+    if fluxus and fluxus.queue_on_teleport then
+        pcall(function()
+            fluxus.queue_on_teleport(scriptSource)
+            queueSuccess = true
+            attempts = attempts + 1
+            print("✅ Queued via fluxus.queue_on_teleport")
+        end)
+    end
+
+    -- Method 4: File backup (for executors with filesystem)
+    if writefile then
+        pcall(function()
+            writefile("SFAA_AutoReload.lua", scriptSource)
+            print("✅ Saved backup to SFAA_AutoReload.lua")
+        end)
+    end
+
+    if queueSuccess then
+        print("🎉 Script queued " .. attempts .. " time(s) for next server")
+    else
+        warn("⚠️ Failed to queue script - Add to autoexec for guaranteed reload")
+    end
+
+    return queueSuccess
+end
+
+-- Improved server hop with better error handling and stability
 local function serverHop()
-    print("🔄 SERVER HOPPING - No valid targets found...")
-    -- Move player up to Y=500 to 'chill' before hopping
+    -- Prevent overlapping server hops
+    if serverHopInProgress then
+        print("⏳ Server hop already in progress - ignoring request")
+        return
+    end
+
+    -- Cooldown check
+    local now = tick()
+    if now - lastServerHopAttempt < SERVER_HOP_COOLDOWN then
+        local remaining = SERVER_HOP_COOLDOWN - (now - lastServerHopAttempt)
+        print("⏳ Server hop on cooldown: " .. math.ceil(remaining) .. "s remaining")
+        return
+    end
+
+    serverHopInProgress = true
+    lastServerHopAttempt = now
+
+    print("\n" .. string.rep("=", 70))
+    print("🔄 INITIATING SERVER HOP")
+    print(string.rep("=", 70))
+
+    -- Move player to safe position
     pcall(function()
         local char = LP and LP.Character
         if char then
@@ -1664,112 +1836,130 @@ local function serverHop()
                 root.CFrame = CFrame.new(root.Position.X, 500, root.Position.Z)
                 root.AssemblyLinearVelocity = Vector3.zero
                 root.AssemblyAngularVelocity = Vector3.zero
-                print("🔼 Moved to Y=500 in preparation for server hop")
+                print("🔼 Moved to safe position")
             end
         end
     end)
-    task.wait(0.35)
-    local scriptToQueue = getgenv().SFAA_SCRIPT_SOURCE
-    if not scriptToQueue or scriptToQueue == "" then
-        warn("⚠️ Script source not found - attempting to capture current script")
-        local info = debug.getinfo(1, "S")
-        if info.source and info.source:sub(1,1) == "@" then
-            pcall(function()
-                scriptToQueue = readfile(info.source:sub(2))
-                getgenv().SFAA_SCRIPT_SOURCE = scriptToQueue
-            end)
-        end
-    end
-    -- Save settings, earnings and meta to executor-persistent storage so next server picks them up
-    pcall(saveSettings)
-    pcall(saveEarnings)
-    pcall(saveMeta)
 
-    local queueSuccess = false
-    local queueCount = 0
-    pcall(function()
-        if queue_on_teleport then
-            queue_on_teleport(scriptToQueue or [[print("⚠️ SFAA failed to reload - script source missing")]])
-            queueSuccess = true
-            queueCount = queueCount + 1
-            print("✅ Method 1: queue_on_teleport SUCCESS")
-        end
-    end)
-    pcall(function()
-        if syn and syn.queue_on_teleport then
-            syn.queue_on_teleport(scriptToQueue or [[print("⚠️ SFAA failed to reload - script source missing")]])
-            queueSuccess = true
-            queueCount = queueCount + 1
-            print("✅ Method 2: syn.queue_on_teleport SUCCESS")
-        end
-    end)
-    pcall(function()
-        if fluxus and fluxus.queue_on_teleport then
-            fluxus.queue_on_teleport(scriptToQueue or [[print("⚠️ SFAA failed to reload - script source missing")]])
-            queueSuccess = true
-            queueCount = queueCount + 1
-            print("✅ Method 3: fluxus.queue_on_teleport SUCCESS")
-        end
-    end)
-    pcall(function()
-        if writefile then
-            writefile("SFAA_AutoReload.lua", scriptToQueue or [[print("⚠️ SFAA backup file empty")]])
-            print("✅ Method 4: Saved to SFAA_AutoReload.lua")
-        end
-    end)
-    if queueSuccess then
-        print("🎉 Script queued " .. queueCount .. " time(s) - Will AUTO-RUN in new server!")
-    else
-        warn("⚠️ Auto-run may not work - Add script to autoexec for guaranteed reload")
-    end
     task.wait(0.5)
-    local success, servers = pcall(function()
-        return game:GetService("HttpService"):JSONDecode(
-            game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")
-        ).data
+
+    -- Cleanup before hopping
+    cleanupBeforeServerHop()
+
+    task.wait(0.5)
+
+    -- Queue script for next server
+    queueScriptForNextServer()
+
+    task.wait(0.5)
+
+    -- Try to find a good server (with fallback to simple teleport)
+    local teleportSuccess = false
+
+    -- Method 1: Try to find populated server (with timeout)
+    local httpSuccess, servers = pcall(function()
+        local timeout = 3 -- 3 second timeout for HTTP request
+        local startTime = tick()
+
+        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+        local response = game:HttpGet(url)
+
+        if tick() - startTime > timeout then
+            warn("⚠️ HTTP request timed out")
+            return nil
+        end
+
+        return game:GetService("HttpService"):JSONDecode(response).data
     end)
-    if success and servers then
+
+    if httpSuccess and servers and type(servers) == "table" then
         local currentServerId = game.JobId
         local goodServers = {}
-        
-        -- Filter servers with 4-8 slots remaining
+
+        -- Filter servers with 4-12 slots remaining (wider range for stability)
         for _, server in ipairs(servers) do
-            if server.id ~= currentServerId then
+            if server.id ~= currentServerId and server.id ~= "" then
                 local slotsRemaining = server.maxPlayers - server.playing
-                if slotsRemaining >= 4 and slotsRemaining <= 8 then
+                if slotsRemaining >= 4 and slotsRemaining <= 12 then
                     table.insert(goodServers, server)
                 end
             end
         end
-        
-        -- Sort by most populated (descending) to get fuller servers first
-        table.sort(goodServers, function(a, b)
-            return a.playing > b.playing
-        end)
-        
-        if #goodServers > 0 then
-            local targetServer = goodServers[1]
+
+        -- Sort by most populated
+        table.sort(goodServers, function(a, b) return a.playing > b.playing end)
+
+        -- Try top 3 servers (in case first fails)
+        for i = 1, math.min(3, #goodServers) do
+            local targetServer = goodServers[i]
             local slotsLeft = targetServer.maxPlayers - targetServer.playing
-            print("🌐 Teleporting to POPULATED server: " .. targetServer.playing .. "/" .. targetServer.maxPlayers .. " players (" .. slotsLeft .. " slots left)")
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer.id, LP)
-            return
-        else
-            print("⚠️ No servers found with 4-8 slots remaining, trying any server with space...")
-            -- Fallback: find any server with at least 4 slots
-            table.sort(servers, function(a, b)
-                return a.playing > b.playing
+
+            print("🌐 Attempt " .. i .. ": Teleporting to server with " .. targetServer.playing .. "/" .. targetServer.maxPlayers .. " players (" .. slotsLeft .. " slots)")
+
+            local success = pcall(function()
+                TeleportService:TeleportToPlaceInstance(
+                    game.PlaceId, 
+                    targetServer.id, 
+                    LP,
+                    "", -- Job ID
+                    nil, -- Spawn name
+                    nil  -- Teleport data
+                )
             end)
-            for _, server in ipairs(servers) do
-                if server.id ~= currentServerId and server.playing < server.maxPlayers - 4 then
-                    print("🌐 Teleporting to server with " .. server.playing .. " players...")
-                    TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LP)
-                    return
-                end
+
+            if success then
+                teleportSuccess = true
+                print("✅ Teleport initiated successfully")
+                break
+            else
+                warn("⚠️ Attempt " .. i .. " failed, trying next server...")
+                task.wait(0.5)
             end
         end
+    else
+        print("⚠️ Could not fetch server list, using simple teleport")
     end
-    print("🌐 Teleporting to random server...")
-    TeleportService:Teleport(game.PlaceId, LP)
+
+    -- Method 2: Simple teleport (fallback)
+    if not teleportSuccess then
+        print("🌐 Using simple teleport to random server...")
+
+        local success = pcall(function()
+            -- Use TeleportAsync for better reliability
+            TeleportService:Teleport(game.PlaceId, LP)
+        end)
+
+        if success then
+            print("✅ Simple teleport initiated")
+        else
+            -- Last resort: SetTeleportGui method
+            warn("⚠️ Simple teleport failed, using emergency method...")
+            pcall(function()
+                local TeleportService = game:GetService("TeleportService")
+                TeleportService:SetTeleportGui(nil)
+                task.wait(0.1)
+                TeleportService:Teleport(game.PlaceId)
+            end)
+        end
+    end
+
+    -- Wait for teleport to complete (with timeout)
+    local waitStart = tick()
+    while tick() - waitStart < 10 do
+        task.wait(0.5)
+    end
+
+    -- If we're still here after 10 seconds, teleport likely failed
+    warn("⚠️ Teleport may have failed - resetting state")
+    serverHopInProgress = false
+
+    -- Re-enable the script if teleport failed
+    task.wait(2)
+    if LP and LP.Parent then
+        print("🔄 Teleport failed - re-enabling script")
+        ArrestSettings.Enabled = true
+        startArrestSystem()
+    end
 end
 
 local function resetArrestState()
