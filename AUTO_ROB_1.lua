@@ -14,6 +14,7 @@ local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 
 -- Script URL (use raw pastebin link)
+getgenv().SFAA_SCRIPT_SOURCE = game:HttpGet("https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua")
 local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua"
 
 LP.OnTeleport:Connect(function(State)
