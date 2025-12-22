@@ -1,5 +1,5 @@
 --[[
-    SFAA - SMART FAST AUTO ARREST V8.0
+    SFAA - SUPER FAST AUTO ARREST V8.0
     AUTO-ENABLED with instant police team switch
     
     FEATURES:
@@ -2407,7 +2407,7 @@ Version.BackgroundTransparency = 1
 Version.Position = UDim2.new(0, 15, 0, 28)
 Version.Size = UDim2.new(1, -30, 0, 16)
 Version.Font = Enum.Font.Gotham
-Version.Text = "Smart Fast Auto Arrest v8.0"
+Version.Text = "Super Fast Auto Arrest v8.0"
 Version.TextColor3 = Color3.fromRGB(140, 150, 170)
 Version.TextSize = 11
 Version.TextXAlignment = Enum.TextXAlignment.Left
