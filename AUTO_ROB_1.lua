@@ -76,6 +76,42 @@ print("✅ Initial wait complete, proceeding...")
 local SFAA_StartTick = tick()
 -- SFAA_StartTime will be initialized from persistent meta (loaded later) or fallback to os.time()
 
+-- Safety: Limit script execution time to prevent infinite loops
+local SCRIPT_START_TIME = os.time()
+local MAX_SCRIPT_RUNTIME = 3600 * 4 -- 4 hours max runtime
+
+task.spawn(function()
+    while task.wait(60) do
+        local runtime = os.time() - SCRIPT_START_TIME
+        if runtime > MAX_SCRIPT_RUNTIME then
+            print("\n" .. string.rep("=", 70))
+            print("⏰ MAX RUNTIME REACHED (" .. math.floor(runtime / 3600) .. " hours)")
+            print("Restarting script to prevent memory issues...")
+            print(string.rep("=", 70) .. "\n")
+            
+            -- Clean restart
+            pcall(function()
+                deepCleanupBeforeHop()
+                task.wait(2)
+                if getgenv().SFAA_SCRIPT_SOURCE and type(getgenv().SFAA_SCRIPT_SOURCE) == "string" then
+                    pcall(loadstring, getgenv().SFAA_SCRIPT_SOURCE)
+                end
+            end)
+            break
+        end
+    end
+end)
+
+-- Safety: Catch any unhandled errors
+local function safeExecute(func, errorMsg)
+    local success, err = pcall(func)
+    if not success then
+        warn("⚠️ " .. (errorMsg or "Error") .. ": " .. tostring(err))
+        -- Don't crash, just log and continue
+    end
+    return success
+end
+
 --// SIMPLE GUI BUTTON CLICKER - NO REMOTES //--
 local function getCurrentTeam()
     if LP.Team then return LP.Team.Name end
@@ -819,10 +855,334 @@ local lastForcedDeathTime = 0
 local deathCount = 0
 local lastDeathTime = 0
 
--- Server hop guards and cooldowns
+-- ============================================
+-- IMPROVED SERVER HOP SYSTEM - CRASH PREVENTION
+-- ============================================
+
+-- Server hop tracking and limits
 local serverHopInProgress = false
 local lastServerHopAttempt = 0
-local SERVER_HOP_COOLDOWN = 10 -- Prevent rapid consecutive hops
+local consecutiveHops = 0
+local lastSuccessfulHop = 0
+local SERVER_HOP_COOLDOWN = 15 -- Increased cooldown between hops
+local MAX_CONSECUTIVE_HOPS = 5 -- Force a break after this many hops
+local CONSECUTIVE_HOP_RESET_TIME = 300 -- Reset counter after 5 minutes
+
+-- Persistent hop counter (survives server hops)
+local HOP_COUNTER_FILE = "SFAA_hop_counter.json"
+
+local function loadHopCounter()
+    local success, json
+    if isfile and readfile and isfile(HOP_COUNTER_FILE) then
+        success, json = pcall(function() return readfile(HOP_COUNTER_FILE) end)
+    elseif syn and syn.read_file and syn.file_exists and syn.file_exists(HOP_COUNTER_FILE) then
+        success, json = pcall(function() return syn.read_file(HOP_COUNTER_FILE) end)
+    elseif getgenv().SFAA_HOP_COUNTER then
+        success, json = true, getgenv().SFAA_HOP_COUNTER
+    end
+    
+    if success and type(json) == "string" and json ~= "" then
+        local ok, data = pcall(function() return HttpService:JSONDecode(json) end)
+        if ok and type(data) == "table" then
+            consecutiveHops = data.count or 0
+            lastSuccessfulHop = data.lastHop or 0
+            print("📊 Loaded hop counter: " .. consecutiveHops .. " consecutive hops")
+            
+            -- Reset if enough time has passed
+            if os.time() - lastSuccessfulHop > CONSECUTIVE_HOP_RESET_TIME then
+                print("⏰ Resetting hop counter (cooldown period elapsed)")
+                consecutiveHops = 0
+            end
+        end
+    end
+end
+
+local function saveHopCounter()
+    local data = {
+        count = consecutiveHops,
+        lastHop = os.time()
+    }
+    
+    pcall(function()
+        local json = HttpService:JSONEncode(data)
+        if writefile then
+            writefile(HOP_COUNTER_FILE, json)
+        elseif syn and syn.write_file then
+            syn.write_file(HOP_COUNTER_FILE, json)
+        else
+            getgenv().SFAA_HOP_COUNTER = json
+        end
+    end)
+end
+
+-- Load counter on script start
+loadHopCounter()
+
+-- Ultra-aggressive cleanup before server hop
+local function deepCleanupBeforeHop()
+    print("\n" .. string.rep("=", 70))
+    print("🧹 DEEP CLEANUP - Preparing for server hop")
+    print(string.rep("=", 70))
+    
+    -- Stop all systems immediately
+    ArrestSettings.Enabled = false
+    
+    -- Disconnect ALL connections
+    local connectionsToClean = {
+        mainConnection,
+        deathConnection,
+        characterConnection,
+        eCycleThread,
+        equipSpamThread
+    }
+    
+    for _, conn in ipairs(connectionsToClean) do
+        pcall(function()
+            if conn then
+                if typeof(conn) == "RBXScriptConnection" then
+                    conn:Disconnect()
+                else
+                    task.cancel(conn)
+                end
+            end
+        end)
+    end
+    
+    mainConnection = nil
+    deathConnection = nil
+    characterConnection = nil
+    eCycleThread = nil
+    equipSpamThread = nil
+    
+    -- Stop all active loops
+    pcall(stopECycle)
+    pcall(stopEquipSpam)
+    
+    -- Clear all state tables
+    arrestState = {
+        active = false,
+        targetPlayer = nil,
+        phase = "SCANNING",
+        recentTargets = {},
+        coverWatchlist = {},
+    }
+    
+    -- Reset character to default state
+    pcall(function()
+        local char = LP.Character
+        if char then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            local hum = char:FindFirstChild("Humanoid")
+            
+            if root then
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+                root.Anchored = false
+            end
+            
+            if hum then
+                hum.PlatformStand = false
+                hum.Sit = false
+                pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+            end
+        end
+    end)
+    
+    -- Reset camera completely
+    pcall(function()
+        Camera.CameraType = Enum.CameraType.Custom
+        Camera.CameraSubject = LP.Character and LP.Character:FindFirstChild("Humanoid")
+        Camera.FieldOfView = 70
+    end)
+    
+    -- Save all persistent data
+    print("💾 Saving persistent data...")
+    pcall(saveSettings)
+    task.wait(0.1)
+    pcall(saveEarnings)
+    task.wait(0.1)
+    pcall(saveMeta)
+    task.wait(0.1)
+    pcall(saveHopCounter)
+    task.wait(0.1)
+    
+    -- Destroy GUI (prevents memory leaks)
+    pcall(function()
+        if ScreenGui and ScreenGui.Parent then
+            ScreenGui:Destroy()
+        end
+    end)
+    
+    task.wait(0.2)
+    
+    -- Aggressive garbage collection (multiple passes)
+    print("🗑️ Running garbage collection...")
+    for i = 1, 5 do
+        collectgarbage("collect")
+        task.wait(0.1)
+    end
+    
+    -- Clear any lingering global references
+    pcall(function()
+        for key, value in pairs(getgenv()) do
+            if type(key) == "string" and key:match("^SFAA_") and key ~= "SFAA_SCRIPT_SOURCE" then
+                if key ~= "SFAA_SAVED_SETTINGS" and 
+                   key ~= "SFAA_EARNINGS" and 
+                   key ~= "SFAA_META" and
+                   key ~= "SFAA_HOP_COUNTER" then
+                    getgenv()[key] = nil
+                end
+            end
+        end
+    end)
+    
+    task.wait(0.2)
+    print("✅ Deep cleanup complete")
+end
+
+-- Simplified script queueing (minimal approach)
+local function queueForNextServer()
+    local scriptSource = getgenv().SFAA_SCRIPT_SOURCE
+    
+    if not scriptSource or scriptSource == "" then
+        warn("⚠️ No script source available for queuing")
+        return false
+    end
+    
+    local queued = false
+    
+    -- Only try methods that are known to work
+    pcall(function()
+        if queue_on_teleport then
+            queue_on_teleport(scriptSource)
+            queued = true
+            print("✅ Queued via queue_on_teleport")
+        end
+    end)
+    
+    pcall(function()
+        if syn and syn.queue_on_teleport then
+            syn.queue_on_teleport(scriptSource)
+            queued = true
+            print("✅ Queued via syn.queue_on_teleport")
+        end
+    end)
+    
+    return queued
+end
+
+-- Simplified, crash-proof server hop
+local function serverHop()
+    -- Check if already hopping
+    if serverHopInProgress then
+        print("⏳ Server hop already in progress")
+        return
+    end
+    
+    -- Check cooldown
+    local now = tick()
+    if now - lastServerHopAttempt < SERVER_HOP_COOLDOWN then
+        local remaining = math.ceil(SERVER_HOP_COOLDOWN - (now - lastServerHopAttempt))
+        print("⏳ Server hop on cooldown: " .. remaining .. "s remaining")
+        return
+    end
+    
+    -- Check consecutive hop limit
+    if consecutiveHops >= MAX_CONSECUTIVE_HOPS then
+        print("\n" .. string.rep("=", 70))
+        print("⚠️ SAFETY LIMIT REACHED")
+        print(string.rep("=", 70))
+        print("Max consecutive hops (" .. MAX_CONSECUTIVE_HOPS .. ") reached")
+        print("Pausing for " .. math.floor(CONSECUTIVE_HOP_RESET_TIME / 60) .. " minutes to prevent crashes")
+        print("Script will continue running in current server")
+        print(string.rep("=", 70) .. "\n")
+        
+        -- Reset counter after waiting
+        task.spawn(function()
+            task.wait(CONSECUTIVE_HOP_RESET_TIME)
+            consecutiveHops = 0
+            saveHopCounter()
+            print("✅ Hop counter reset - server hopping re-enabled")
+        end)
+        
+        return
+    end
+    
+    -- Begin hop process
+    serverHopInProgress = true
+    lastServerHopAttempt = now
+    consecutiveHops = consecutiveHops + 1
+    
+    print("\n" .. string.rep("=", 70))
+    print("🔄 SERVER HOP #" .. consecutiveHops .. " / " .. MAX_CONSECUTIVE_HOPS)
+    print(string.rep("=", 70))
+    
+    -- Move to safe position
+    pcall(function()
+        local char = LP.Character
+        if char then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root then
+                root.CFrame = CFrame.new(root.Position.X, 1000, root.Position.Z)
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+    end)
+    
+    task.wait(1) -- Longer wait for safety
+    
+    -- Deep cleanup
+    deepCleanupBeforeHop()
+    
+    task.wait(1) -- Longer wait after cleanup
+    
+    -- Queue script
+    queueForNextServer()
+    
+    task.wait(0.5)
+    
+    -- Save hop counter
+    saveHopCounter()
+    
+    task.wait(0.5)
+    
+    -- SIMPLIFIED TELEPORT - No complex server selection
+    print("🌐 Initiating teleport...")
+    
+    local teleportSuccess = false
+    
+    -- Method 1: Simple Teleport (most reliable)
+    pcall(function()
+        TeleportService:Teleport(game.PlaceId, LP)
+        teleportSuccess = true
+        print("✅ Teleport initiated")
+    end)
+    
+    -- Wait for teleport with timeout
+    local waitStart = tick()
+    while tick() - waitStart < 15 do
+        task.wait(1)
+    end
+    
+    -- If still here, teleport failed
+    warn("⚠️ Teleport failed - resetting state")
+    serverHopInProgress = false
+    consecutiveHops = math.max(0, consecutiveHops - 1) -- Reduce counter since hop failed
+    saveHopCounter()
+    
+    -- Wait before allowing retry
+    task.wait(5)
+    
+    -- Try to recover by restarting script
+    if LP and LP.Parent then
+        print("🔄 Teleport failed - restarting script in current server")
+        -- Reload the script
+        pcall(function()
+            loadstring(getgenv().SFAA_SCRIPT_SOURCE)()
+        end)
+    end
+end
 
 --// UTILITY FUNCTIONS //--
 local function getMoney()
@@ -1961,6 +2321,39 @@ local function serverHop()
         startArrestSystem()
     end
 end
+
+-- Periodic memory cleanup (runs every 5 minutes)
+task.spawn(function()
+    while task.wait(300) do
+        pcall(function()
+            print("🗑️ Periodic memory cleanup...")
+            for i = 1, 2 do
+                collectgarbage("collect")
+                task.wait(0.1)
+            end
+            print("✅ Memory cleanup complete")
+        end)
+    end
+end)
+
+-- Monitor for memory issues
+task.spawn(function()
+    while task.wait(60) do
+        pcall(function()
+            local stats = game:GetService("Stats")
+            local memUsed = stats:GetTotalMemoryUsageMb()
+            
+            if memUsed and memUsed > 1500 then -- High memory usage warning
+                warn("⚠️ High memory usage detected: " .. math.floor(memUsed) .. "MB")
+                print("Running emergency garbage collection...")
+                for i = 1, 3 do
+                    collectgarbage("collect")
+                    task.wait(0.2)
+                end
+            end
+        end)
+    end
+end)
 
 local function resetArrestState()
     print("💀 Player died - resetting state...")
