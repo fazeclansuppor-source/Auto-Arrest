@@ -14,7 +14,7 @@ local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 
 -- Script URL (use raw pastebin link)
-local SCRIPT_URL = "https://pastebin.com/raw/RyMDe6r9"
+local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/auto_rob.lua"
 
 LP.OnTeleport:Connect(function(State)
     if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
