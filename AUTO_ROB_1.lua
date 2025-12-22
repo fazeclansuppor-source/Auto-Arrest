@@ -2937,7 +2937,7 @@ spawn(function()
                 ServerHopLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
             end
         else
-            ServerHopLabel.Text = "serverhop (disabled by default)"
+            ServerHopLabel.Text = "Serverhop"
             ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
         end
 
