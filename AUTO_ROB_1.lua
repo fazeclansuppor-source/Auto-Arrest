@@ -46,9 +46,26 @@ print("\n" .. string.rep("=", 70))
 print("🚔 SFAA V8.0 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
 print(string.rep("=", 70))
 
+-- ================= CONFIG =================
+-- Simple, user-editable configuration values
+-- Change these to tune behavior for slow clients or different preferences
+local SFAA_Config = {
+    -- Seconds to wait at script start for the client and PlayerGui to initialize.
+    -- Increase this if your executor or game client loads slowly. (Default: 10)
+    InitialClientWait = 10,
+
+    -- Maximum seconds to wait for LocalPlayer.PlayerGui to appear when auto-starting.
+    -- Set to 0 to wait indefinitely until PlayerGui is present. (Default: 30)
+    PlayerGuiWaitTimeout = 30,
+
+    -- Poll interval (seconds) when waiting for PlayerGui to appear. (Default: 0.5)
+    PlayerGuiPollInterval = 0.5,
+}
+-- ============================================
+
 -- Safety: wait a short period at script start so the client and PlayerGui can fully initialize
-print("⏳ Waiting 10s for client to initialize before starting...")
-task.wait(10)
+print("⏳ Waiting " .. tostring(SFAA_Config.InitialClientWait) .. "s for client to initialize before starting...")
+task.wait(SFAA_Config.InitialClientWait)
 print("✅ Initial wait complete, proceeding...")
 
 --// SIMPLE GUI BUTTON CLICKER - NO REMOTES //--
@@ -2951,9 +2968,12 @@ print("⚡ AUTO-STARTING ARREST SYSTEM...")
 local playersSvc = game:GetService("Players")
 local localP = playersSvc.LocalPlayer
 local waited = 0
-while (not localP or not localP.Parent or not localP:FindFirstChild("PlayerGui")) and waited < 30 do
-    task.wait(0.5)
-    waited = waited + 0.5
+local guiTimeout = (SFAA_Config and SFAA_Config.PlayerGuiWaitTimeout) or 30
+local guiPoll = (SFAA_Config and SFAA_Config.PlayerGuiPollInterval) or 0.5
+-- If guiTimeout <= 0, loop will wait indefinitely until PlayerGui appears
+while (not localP or not localP.Parent or not localP:FindFirstChild("PlayerGui")) and (guiTimeout <= 0 or waited < guiTimeout) do
+    task.wait(guiPoll)
+    waited = waited + guiPoll
     localP = playersSvc.LocalPlayer
 end
 -- Proceed with startup
