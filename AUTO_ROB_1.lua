@@ -70,7 +70,7 @@ print("✅ Initial wait complete, proceeding...")
 
 -- Script start timestamp (used for uptime display)
 local SFAA_StartTick = tick()
-local SFAA_StartTime = os.time()
+-- SFAA_StartTime will be initialized from persistent meta (loaded later) or fallback to os.time()
 
 --// SIMPLE GUI BUTTON CLICKER - NO REMOTES //--
 local function getCurrentTeam()
@@ -671,6 +671,42 @@ local function loadEarnings()
     end
 end
 
+-- Persistent meta (e.g., global start time across server hops)
+local META_FILE = "SFAA_meta.json"
+local metaData = {}
+
+local function saveMeta()
+    local ok, err = pcall(function()
+        local json = HttpService:JSONEncode(metaData)
+        if writefile then
+            writefile(META_FILE, json)
+        elseif syn and syn.write_file then
+            syn.write_file(META_FILE, json)
+        else
+            getgenv().SFAA_META = json
+        end
+    end)
+    if not ok then warn("⚠️ saveMeta failed:", err) end
+end
+
+local function loadMeta()
+    local success, json
+    if isfile and readfile and isfile(META_FILE) then
+        success, json = pcall(function() return readfile(META_FILE) end)
+    elseif syn and syn.read_file and syn.file_exists and syn.file_exists(META_FILE) then
+        success, json = pcall(function() return syn.read_file(META_FILE) end)
+    elseif getgenv().SFAA_META then
+        success, json = true, getgenv().SFAA_META
+    end
+    if success and type(json) == "string" and json ~= "" then
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(json) end)
+        if ok and type(decoded) == "table" then
+            metaData = decoded
+            print("✅ Loaded meta data")
+        end
+    end
+end
+
 local function recordEarning(amount)
     if not amount or amount <= 0 then return end
     table.insert(earningsData, {time = os.time(), amount = amount})
@@ -705,6 +741,16 @@ local function computeHourlyRate(windowSeconds)
 end
 
 loadEarnings()
+loadMeta()
+
+-- Initialize persistent start time (preserve across server hops)
+if metaData and metaData.startUnix and type(metaData.startUnix) == "number" then
+    SFAA_StartTime = metaData.startUnix
+else
+    SFAA_StartTime = os.time()
+    metaData.startUnix = SFAA_StartTime
+    pcall(saveMeta)
+end
 
 -- Uptime helper (HH:MM:SS)
 local function formatUptime(seconds)
@@ -1545,9 +1591,10 @@ local function serverHop()
             end)
         end
     end
-    -- Save settings and earnings to executor-persistent storage so next server picks them up
+    -- Save settings, earnings and meta to executor-persistent storage so next server picks them up
     pcall(saveSettings)
     pcall(saveEarnings)
+    pcall(saveMeta)
 
     local queueSuccess = false
     local queueCount = 0
@@ -2381,7 +2428,7 @@ local MainFrame = Instance.new("Frame")
 MainFrame.Parent = ScreenGui
 MainFrame.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
 MainFrame.BorderSizePixel = 0
-MainFrame.Position = UDim2.new(0.02, 0, 0.3, 0)
+MainFrame.Position = UDim2.new(0, 12, 0, 12) -- top-left with padding (12px from edges)
 MainFrame.Size = UDim2.new(0, 320, 0, 480)
 
 local MainCorner = Instance.new("UICorner")
@@ -2965,8 +3012,8 @@ spawn(function()
             ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
         end
 
-        -- Update uptime display
-        local uptimeSec = math.max(0, tick() - (SFAA_StartTick or tick()))
+        -- Update uptime display (persistent across server hops)
+        local uptimeSec = math.max(0, os.time() - (SFAA_StartTime or os.time()))
         pcall(function()
             UptimeLabel.Text = "Uptime: " .. formatUptime(uptimeSec)
         end)
