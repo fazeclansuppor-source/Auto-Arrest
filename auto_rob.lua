@@ -14,7 +14,7 @@ local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 
 -- Script URL (use raw pastebin link)
-local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/auto_rob.lua"
+local SCRIPT_URL = "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua"
 
 LP.OnTeleport:Connect(function(State)
     if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
@@ -45,6 +45,11 @@ local Camera = W.CurrentCamera
 print("\n" .. string.rep("=", 70))
 print("🚔 SFAA V8.0 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
 print(string.rep("=", 70))
+
+-- Safety: wait a short period at script start so the client and PlayerGui can fully initialize
+print("⏳ Waiting 6s for client to initialize before starting...")
+task.wait(6)
+print("✅ Initial wait complete, proceeding...")
 
 --// SIMPLE GUI BUTTON CLICKER - NO REMOTES //--
 local function getCurrentTeam()
@@ -344,13 +349,37 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
             -- Ensure we have a small pause; prevent rapid-fire killing
             task.wait(0.2)
 
-            -- Force death first so spawn selection menu will be available
+            -- Before forcing death, re-check position and apply a death cooldown to avoid rapid repeated kills
             pcall(function()
-                if LP.Character and LP.Character:FindFirstChild("Humanoid") then
-                    LP.Character.Humanoid.Health = 0
+                if LP.Character then
+                    local root = LP.Character:FindFirstChild("HumanoidRootPart")
+                    local hum = LP.Character:FindFirstChild("Humanoid")
+                    if root and hum then
+                        -- If we're already at Military Base, stop attempting to force death
+                        if isAtMilitaryBase(root.Position) then
+                            print("✅ Already at Military Base — aborting forced death")
+                            lastForcedDeathTime = tick()
+                            return true
+                        end
+                        local now = tick()
+                        local cooldown = (ArrestSettings and ArrestSettings.SpawnDeathCooldown) or 3
+                        local since = now - (lastForcedDeathTime or 0)
+                        if since < cooldown then
+                            local rem = cooldown - since
+                            print("⏳ Death cooldown active: waiting " .. string.format("%.1f", rem) .. "s before forced death")
+                            task.wait(rem)
+                        end
+                        if hum.Health > 0 then
+                            hum.Health = 0
+                            lastForcedDeathTime = tick()
+                            print("💀 Forced death to trigger spawn menu")
+                        else
+                            print("⚠️ Humanoid already dead; skipping forced death")
+                        end
+                    end
                 end
             end)
-            task.wait(0.6)
+            task.wait(0.6)"
 
             -- Update spawn data on server (refresh choices) before selecting Military Base
             pcall(function()
@@ -392,12 +421,38 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
                     local radius = (ArrestSettings and ArrestSettings.UFOBunkerRadius) or 250
                     if dist and dist <= radius then
                         print("✅ Spawned at Military Base after attempt " .. attempt)
+                        -- Successful spawn; clear death tracking
+                        deathCount = 0
+                        lastDeathTime = 0
                         return true
                     else
-                        print("⚠️ Not close enough to military base; killing and retrying...")
+                        print("⚠️ Not close enough to military base; attempting forced death and retry...")
                         pcall(function()
-                            if LP.Character and LP.Character:FindFirstChild("Humanoid") then
-                                LP.Character.Humanoid.Health = 0
+                            if LP.Character then
+                                local root = LP.Character:FindFirstChild("HumanoidRootPart")
+                                local hum = LP.Character:FindFirstChild("Humanoid")
+                                if root and hum then
+                                    if isAtMilitaryBase(root.Position) then
+                                        print("✅ After load: At Military Base — aborting further attempts")
+                                        lastForcedDeathTime = tick()
+                                        return true
+                                    end
+                                    local now = tick()
+                                    local cooldown = (ArrestSettings and ArrestSettings.SpawnDeathCooldown) or 3
+                                    local since = now - (lastForcedDeathTime or 0)
+                                    if since < cooldown then
+                                        local rem = cooldown - since
+                                        print("⏳ Death cooldown active: waiting " .. string.format("%.1f", rem) .. "s before forced death")
+                                        task.wait(rem)
+                                    end
+                                    if hum.Health > 0 then
+                                        hum.Health = 0
+                                        lastForcedDeathTime = tick()
+                                        print("💀 Forced death to retry spawn")
+                                    else
+                                        print("⚠️ Humanoid already dead; skipping forced death")
+                                    end
+                                end
                             end
                         end)
                         task.wait(currentDelay)
@@ -411,6 +466,9 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
         -- attempts exhausted
         if (ArrestSettings and ArrestSettings.ServerHopEnabled) then
             print("🔄 Spawn attempts failed after " .. maxAttempts .. " attempts; server hopping as fallback")
+            -- Reset death counter before hopping
+            deathCount = 0
+            lastDeathTime = 0
             pcall(serverHop)
         else
             print("⚠️ Spawn attempts failed after " .. maxAttempts .. " attempts and ServerHop disabled")
@@ -428,7 +486,15 @@ end
 -- SWITCH TO POLICE IMMEDIATELY AT STARTUP
 print("⚡ AUTO-SWITCHING TO POLICE TEAM...")
 clickPoliceButton()
-task.wait(2)
+-- Wait up to 6s for the team change to apply to avoid running spawn logic too early
+local switchTimeout = 6
+local switchStart = tick()
+while tick() - switchStart < switchTimeout do
+    if LP.Team and (LP.Team.Name == "Police" or LP.Team.Name == "Cop") then break end
+    task.wait(0.2)
+end
+-- extra small settle wait
+task.wait(0.5)
 print("✅ Team switch complete - checking spawn location...")
 
 -- Check if spawned at military base on startup
@@ -482,12 +548,60 @@ local ArrestSettings = {
     SpawnAttemptInitialDelay = 2.5, -- initial delay between spawn attempts
     SpawnAttemptBackoff = 1.0, -- incremental backoff added per attempt
     SpawnAttemptSettleTime = 1.0, -- wait after LoadCharacter before checking position
+    SpawnDeathCooldown = 3, -- seconds to wait between forced deaths to prevent rapid respawns
+    -- If killed repeatedly by external sources, hop after this many deaths within the window
+    DeathsBeforeServerHop = 6,
+    DeathsWindowSeconds = 60,
     ServerHopEnabled = true, -- ENABLED BY DEFAULT
     ServerHopDelay = 2,
     AutoStartAfterHop = false,
 }
 
+-- Persisted settings file
+local SETTINGS_FILE = "SFAA_settings.json"
+
+local function saveSettings()
+    local ok, err = pcall(function()
+        local data = {}
+        for k, v in pairs(ArrestSettings) do
+            data[k] = v
+        end
+        local json = HttpService:JSONEncode(data)
+        if writefile then
+            writefile(SETTINGS_FILE, json)
+        elseif syn and syn.write_file then
+            syn.write_file(SETTINGS_FILE, json)
+        else
+            -- Fallback to global table for executors without file APIs
+            getgenv().SFAA_SAVED_SETTINGS = json
+        end
+    end)
+    if not ok then warn("⚠️ saveSettings failed:", err) end
+end
+
+local function loadSettings()
+    local success, json
+    if isfile and readfile and isfile(SETTINGS_FILE) then
+        success, json = pcall(function() return readfile(SETTINGS_FILE) end)
+    elseif syn and syn.read_file and syn.file_exists and syn.file_exists(SETTINGS_FILE) then
+        success, json = pcall(function() return syn.read_file(SETTINGS_FILE) end)
+    elseif getgenv().SFAA_SAVED_SETTINGS then
+        success, json = true, getgenv().SFAA_SAVED_SETTINGS
+    end
+    if success and type(json) == "string" and json ~= "" then
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(json) end)
+        if ok and type(decoded) == "table" then
+            for k, v in pairs(decoded) do
+                -- Only set keys that already exist to avoid unexpected injection
+                if ArrestSettings[k] ~= nil then ArrestSettings[k] = v end
+            end
+            print("✅ Loaded saved settings")
+        end
+    end
+end
+
 --// ARREST STATE //--
+loadSettings()
 local arrestState = {
     active = false,
     targetPlayer = nil,
@@ -524,6 +638,11 @@ local characterConnection = nil
 
 -- Prevent overlapping spawn attempts
 local spawnAttemptInProgress = false
+-- Track last forced death time to prevent rapid repeated killing
+local lastForcedDeathTime = 0
+-- Track recent death counts to decide when to server-hop
+local deathCount = 0
+local lastDeathTime = 0
 
 --// UTILITY FUNCTIONS //--
 local function getMoney()
@@ -1431,7 +1550,7 @@ local function onCharacterAdded(character)
     local root = character:WaitForChild("HumanoidRootPart")
     local hum = character:WaitForChild("Humanoid")
     
-    task.wait(2) -- Wait for spawn to complete
+    task.wait(6) -- Wait longer for spawn to complete and client to fully initialize (helps avoid being wrong team/crim)
     
     -- Check if spawned at military base
     local spawnPos = root.Position
@@ -1471,7 +1590,31 @@ local function onCharacterAdded(character)
     end
     if hum then
         deathConnection = hum.Died:Connect(function()
-            print("💀 Player died - attempting to respawn at Military Base repeatedly...")
+            local now = tick()
+            local window = (ArrestSettings and ArrestSettings.DeathsWindowSeconds) or 60
+            if (now - (lastDeathTime or 0)) > window then
+                deathCount = 1
+            else
+                deathCount = (deathCount or 0) + 1
+            end
+            lastDeathTime = now
+            lastForcedDeathTime = now
+            print("💀 Player died - resetting state... (death count: " .. tostring(deathCount) .. ")")
+
+            local threshold = (ArrestSettings and ArrestSettings.DeathsBeforeServerHop) or 6
+            if deathCount >= threshold then
+                if ArrestSettings.ServerHopEnabled then
+                    print("🔄 Death threshold reached (" .. tostring(deathCount) .. ") - server hopping to escape repeated kills")
+                    deathCount = 0
+                    lastDeathTime = 0
+                    task.spawn(function() pcall(serverHop) end)
+                else
+                    print("⚠️ Death threshold reached but ServerHop is disabled")
+                end
+                resetArrestState()
+                return
+            end
+
             -- Spawn attempts run in a background thread so we don't block the death event
             task.spawn(function()
                 ensureSpawnAtMilitaryOrClearDoor(6)
@@ -2184,6 +2327,7 @@ CloseBtn.MouseButton1Click:Connect(function()
         ArrestSettings.Enabled = false
         stopArrestSystem()
     end
+    saveSettings()
     ScreenGui:Destroy()
     print("👋 SFAA GUI Closed")
 end)
@@ -2428,7 +2572,7 @@ CooldownLabel.BackgroundTransparency = 1
 CooldownLabel.Position = UDim2.new(0, 12, 0, 132)
 CooldownLabel.Size = UDim2.new(1, -24, 0, 14)
 CooldownLabel.Font = Enum.Font.Gotham
-CooldownLabel.Text = "arrest cooldown: 0.0"
+CooldownLabel.Text = "vehicle respawn: 0.0"
 CooldownLabel.TextColor3 = Color3.fromRGB(120, 130, 150)
 CooldownLabel.TextSize = 11
 CooldownLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -2608,6 +2752,7 @@ BountyInput.FocusLost:Connect(function()
     if n and n >= 0 then
         ArrestSettings.BountyThreshold = n
         BountyInput.Text = tostring(ArrestSettings.BountyThreshold)
+        saveSettings()
         print("💰 Bounty threshold set to: $" .. ArrestSettings.BountyThreshold)
         if ArrestSettings.Enabled then
             ToggleBtn.Text = "ACTIVE - Min: $" .. ArrestSettings.BountyThreshold
@@ -2621,6 +2766,7 @@ CharSpeedInput.FocusLost:Connect(function()
     local n = tonumber(CharSpeedInput.Text)
     if n and n > 0 then
         ArrestSettings.CharacterFlySpeed = n
+        saveSettings()
     else
         CharSpeedInput.Text = tostring(ArrestSettings.CharacterFlySpeed)
     end
@@ -2630,6 +2776,7 @@ VehSpeedInput.FocusLost:Connect(function()
     local n = tonumber(VehSpeedInput.Text)
     if n and n > 0 then
         ArrestSettings.VehicleFlySpeed = n
+        saveSettings()
     else
         VehSpeedInput.Text = tostring(ArrestSettings.VehicleFlySpeed)
     end
@@ -2645,6 +2792,7 @@ ServerHopToggle.MouseButton1Click:Connect(function()
         arrestState.noTargetsStartTime = nil
         print("🔄 Server hop disabled")
     end
+    saveSettings()
 end)
 
 local lastUIUpdate = 0
@@ -2657,7 +2805,7 @@ spawn(function()
         end
         lastUIUpdate = currentTime
         local cooldown = getSpawnCooldownRemaining()
-        CooldownLabel.Text = "arrest cooldown: " .. string.format("%.1f", cooldown)
+        CooldownLabel.Text = "vehicle respawn: " .. string.format("%.1f", cooldown)
         local avgSpeed = (ArrestSettings.CharacterFlySpeed + ArrestSettings.VehicleFlySpeed) / 2
         local percent = (avgSpeed / 300) * 100
         SpeedPercent.Text = string.format("%.2f%%", percent)
@@ -2690,7 +2838,17 @@ print("")
 
 -- AUTO-START AFTER GUI LOADS
 print("⚡ AUTO-STARTING ARREST SYSTEM...")
-task.wait(1)
+-- Wait for LocalPlayer and PlayerGui to be ready to avoid running too early
+local playersSvc = game:GetService("Players")
+local localP = playersSvc.LocalPlayer
+local waited = 0
+while (not localP or not localP.Parent or not localP:FindFirstChild("PlayerGui")) and waited < 30 do
+    task.wait(0.5)
+    waited = waited + 0.5
+    localP = playersSvc.LocalPlayer
+end
+-- Proceed with startup
+task.wait(0.5)
 ArrestSettings.Enabled = true
 arrestState.phase = "SCANNING"
 arrestState.startMoney = getMoney()
