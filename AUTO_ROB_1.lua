@@ -793,8 +793,10 @@ local arrestState = {
     prevLocalMoney = 0,
     targetCoverStart = nil,
     recentTargets = {},
+    -- Players detected under cover are stored here so we can target them when they leave cover
+    coverWatchlist = {},
     noTargetsStartTime = nil,
-}
+} 
 
 --// MAIN CONNECTIONS //--
 local mainConnection = nil
@@ -924,6 +926,10 @@ local function findNearestCriminal()
             else
                 if isPlayerUnderCover(player) then
                     print("⚠️ Skipping " .. player.Name .. " - under terrain/roof")
+                    -- Track this player so we can consider them immediately when they leave cover
+                    pcall(function()
+                        arrestState.coverWatchlist[player.UserId] = tick()
+                    end)
                 else
                     if ArrestSettings.BountyFilterEnabled then
                         local b = getPlayerBounty(player)
@@ -978,7 +984,52 @@ local function findNearestCriminal()
     return nearestCriminal, shortestDistance
 end
 
-local function findNearbyCriminalAround(position, radius)
+-- Returns a watched player who has left cover (based on ArrestSettings.TargetMode).
+-- Returns player, distance if found, otherwise nil.
+local function getUncoveredWatchedPlayer()
+    local now = tick()
+    local bestPlayer, bestDist, bestBounty = nil, math.huge, -1
+    -- prune very old entries (>10min) and pick best candidate
+    for userId, seenAt in pairs(arrestState.coverWatchlist) do
+        if not seenAt or (now - seenAt) > 600 then
+            -- stale entry - remove
+            arrestState.coverWatchlist[userId] = nil
+        else
+            local player = P:GetPlayerByUserId(userId)
+            if player and isTargetValid(player) and not isPlayerUnderCover(player) then
+                -- ensure not recently targeted
+                local expiry = arrestState.recentTargets[player.UserId]
+                if not (expiry and expiry > now) then
+                    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                        local dist = myRoot and (myRoot.Position - root.Position).Magnitude or math.huge
+                        if ArrestSettings.TargetMode == "highest bounty" then
+                            local b = getPlayerBounty(player) or 0
+                            if b > bestBounty then
+                                bestBounty = b
+                                bestPlayer = player
+                                bestDist = dist
+                            end
+                        else
+                            if dist < bestDist then
+                                bestPlayer = player
+                                bestDist = dist
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if bestPlayer then
+        arrestState.coverWatchlist[bestPlayer.UserId] = nil
+        return bestPlayer, bestDist
+    end
+    return nil
+end
+
+local function findNearbyCriminalAround(position, radius) 
     radius = radius or 75
     for _, player in ipairs(P:GetPlayers()) do
         if isTargetValid(player) and player ~= arrestState.targetPlayer then
@@ -2023,7 +2074,19 @@ local function startArrestSystem()
                 pcall(function() stopECycle() end)
                 arrestState.handcuffsEquipped = false
                 local newTarget, distance = findNearestCriminal()
+                local fromWatch = false
+                if not newTarget then
+                    local wp, wdist = getUncoveredWatchedPlayer()
+                    if wp then
+                        newTarget = wp
+                        distance = wdist
+                        fromWatch = true
+                    end
+                end
                 if newTarget then
+                    if fromWatch then
+                        print("🔎 Watched target left cover: " .. newTarget.Name .. " (" .. math.floor(distance) .. " studs)")
+                    end
                     arrestState.noTargetsStartTime = nil
                     arrestState.targetPlayer = newTarget
                     arrestState.targetStartMoney = getPlayerMoney(newTarget) or 0
