@@ -1430,50 +1430,7 @@ local function aimCameraAt(position)
     end)
 end
 
--- Find an opening in cover above a player
-local function findCoverOpening(targetPlayer)
-    if not targetPlayer or not targetPlayer.Character then return nil end
-    local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not targetRoot then return nil end
-    
-    local targetPos = targetRoot.Position
-    local searchRadius = 50 -- studs to search around target
-    local searchHeight = 500 -- how high to check
-    
-    -- Check directly above first
-    local directCheck = targetPos + Vector3.new(0, 10, 0)
-    local raycastParams = RaycastParams.new()
-    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
-    raycastParams.FilterDescendantsInstances = {LP.Character, targetPlayer.Character}
-    
-    local result = W:Raycast(directCheck, Vector3.new(0, searchHeight, 0), raycastParams)
-    if not result then
-        -- Direct path to sky - return position directly above
-        return Vector3.new(targetPos.X, targetPos.Y + 20, targetPos.Z), 0
-    end
-    
-    -- Check in a circle around the target for openings
-    local angles = {0, 45, 90, 135, 180, 225, 270, 315}
-    local radii = {10, 20, 30, 40, 50}
-    
-    for _, radius in ipairs(radii) do
-        for _, angle in ipairs(angles) do
-            local rad = math.rad(angle)
-            local offsetX = math.cos(rad) * radius
-            local offsetZ = math.sin(rad) * radius
-            
-            local checkPos = targetPos + Vector3.new(offsetX, 10, offsetZ)
-            local result = W:Raycast(checkPos, Vector3.new(0, searchHeight, 0), raycastParams)
-            
-            if not result then
-                -- Found an opening!
-                return Vector3.new(checkPos.X, targetPos.Y + 20, checkPos.Z), radius
-            end
-        end
-    end
-    
-    return nil, nil -- No opening found
-end
+
 
 local function findNearestCriminal()
     local char = LP.Character
@@ -1498,28 +1455,11 @@ local function findNearestCriminal()
             if expiry and expiry > now then
             else
                 if isPlayerUnderCover(player) then
-                    -- Check for cover openings near the player
-                    local openingPos, openingDist = findCoverOpening(player)
-                    if openingPos then
-                        print("✅ Found cover opening for " .. player.Name .. " at " .. math.floor(openingDist) .. " studs from target")
-                        -- Store structured info in watchlist
-                        pcall(function()
-                            arrestState.coverWatchlist[player.UserId] = {
-                                timestamp = tick(),
-                                openingPos = openingPos,
-                                openingDist = openingDist
-                            }
-                        end)
-                    else
-                        print("⚠️ Skipping " .. player.Name .. " - under cover with no openings found")
-                        -- Track this player so we can check again later
-                        pcall(function()
-                            arrestState.coverWatchlist[player.UserId] = {
-                                timestamp = tick(),
-                                openingPos = nil
-                            }
-                        end)
-                    end
+                    print("⚠️ Skipping " .. player.Name .. " - under terrain/roof")
+                    -- Track this player so we can consider them immediately when they leave cover
+                    pcall(function()
+                        arrestState.coverWatchlist[player.UserId] = tick()
+                    end)
                 else
                     if ArrestSettings.BountyFilterEnabled then
                         local b = getPlayerBounty(player)
@@ -1579,49 +1519,32 @@ end
 local function getUncoveredWatchedPlayer()
     local now = tick()
     local bestPlayer, bestDist, bestBounty = nil, math.huge, -1
-    local bestOpeningPos = nil
-    
     -- prune very old entries (>10min) and pick best candidate
-    for userId, data in pairs(arrestState.coverWatchlist) do
-        if type(data) == "number" then
-            -- Old format compatibility
-            if (now - data) > 600 then
-                arrestState.coverWatchlist[userId] = nil
-            end
-        elseif type(data) == "table" then
-            local seenAt = data.timestamp
-            if not seenAt or (now - seenAt) > 600 then
-                arrestState.coverWatchlist[userId] = nil
-            else
-                local player = P:GetPlayerByUserId(userId)
-                if player and isTargetValid(player) then
-                    -- Check if player is no longer under cover OR has a cover opening
-                    local underCover = isPlayerUnderCover(player)
-                    local hasOpening = data.openingPos ~= nil
-                    
-                    if not underCover or hasOpening then
-                        -- ensure not recently targeted
-                        local expiry = arrestState.recentTargets[player.UserId]
-                        if not (expiry and expiry > now) then
-                            local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-                            if root then
-                                local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-                                local dist = myRoot and (myRoot.Position - root.Position).Magnitude or math.huge
-                                if ArrestSettings.TargetMode == "highest bounty" then
-                                    local b = getPlayerBounty(player) or 0
-                                    if b > bestBounty then
-                                        bestBounty = b
-                                        bestPlayer = player
-                                        bestDist = dist
-                                        bestOpeningPos = data.openingPos
-                                    end
-                                else
-                                    if dist < bestDist then
-                                        bestPlayer = player
-                                        bestDist = dist
-                                        bestOpeningPos = data.openingPos
-                                    end
-                                end
+    for userId, seenAt in pairs(arrestState.coverWatchlist) do
+        if not seenAt or (now - seenAt) > 600 then
+            -- stale entry - remove
+            arrestState.coverWatchlist[userId] = nil
+        else
+            local player = P:GetPlayerByUserId(userId)
+            if player and isTargetValid(player) and not isPlayerUnderCover(player) then
+                -- ensure not recently targeted
+                local expiry = arrestState.recentTargets[player.UserId]
+                if not (expiry and expiry > now) then
+                    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                        local dist = myRoot and (myRoot.Position - root.Position).Magnitude or math.huge
+                        if ArrestSettings.TargetMode == "highest bounty" then
+                            local b = getPlayerBounty(player) or 0
+                            if b > bestBounty then
+                                bestBounty = b
+                                bestPlayer = player
+                                bestDist = dist
+                            end
+                        else
+                            if dist < bestDist then
+                                bestPlayer = player
+                                bestDist = dist
                             end
                         end
                     end
@@ -1629,10 +1552,9 @@ local function getUncoveredWatchedPlayer()
             end
         end
     end
-    
     if bestPlayer then
         arrestState.coverWatchlist[bestPlayer.UserId] = nil
-        return bestPlayer, bestDist, bestOpeningPos
+        return bestPlayer, bestDist
     end
     return nil
 end
@@ -1850,6 +1772,17 @@ local function shootAtTarget()
     if not targetRoot then return end
     
     local distance = (root.Position - targetRoot.Position).Magnitude
+    
+    -- IMPORTANT: If too close, switch to handcuffs and stop shooting
+    if distance < 50 then
+        if pistolEquipped then
+            print("🔫 Close enough - switching to handcuffs")
+            equipHandcuffs()
+            pistolEquipped = false
+        end
+        return
+    end
+    
     if distance > (ArrestSettings.ShootRange or 200) then return end
     
     -- Ensure pistol is equipped
@@ -1863,55 +1796,20 @@ local function shootAtTarget()
     local aimPos = targetRoot.Position
     aimCameraAt(aimPos)
     
-    -- Fire pistol with multiple remote attempts
+    -- Fire pistol
     pcall(function()
         local folder = LP:FindFirstChild("Folder")
         if folder then
             local pistol = folder:FindFirstChild("Pistol")
             if pistol then
-                -- Try to find the shoot remote
                 local shootRemote = pistol:FindFirstChild("Shoot") or 
                                   pistol:FindFirstChild("Fire") or 
                                   pistol:FindFirstChild("RemoteEvent") or
                                   pistol:FindFirstChildWhichIsA("RemoteEvent")
                 
                 if shootRemote and shootRemote.FireServer then
-                    -- Try different argument patterns that Jailbreak might use
-                    local success = false
-                    
-                    -- Method 1: Target position
-                    success = pcall(function() 
-                        shootRemote:FireServer(aimPos)
-                    end)
-                    
-                    -- Method 2: No arguments
-                    if not success then
-                        pcall(function() 
-                            shootRemote:FireServer()
-                        end)
-                    end
-                    
-                    -- Method 3: Target root
-                    if not success then
-                        pcall(function() 
-                            shootRemote:FireServer(targetRoot)
-                        end)
-                    end
-                    
-                    -- Method 4: Hit data table
-                    if not success then
-                        pcall(function()
-                            shootRemote:FireServer({
-                                Hit = targetRoot,
-                                Target = targetRoot,
-                                Position = aimPos
-                            })
-                        end)
-                    end
-                    
+                    pcall(function() shootRemote:FireServer(aimPos) end)
                     lastPistolShot = now
-                    -- Visual feedback (commented out to reduce spam)
-                    -- print("🔫 Fired at " .. arrestState.targetPlayer.Name .. "'s vehicle")
                 end
             end
         end
@@ -2062,14 +1960,47 @@ local function exitVehicle()
     if not char then return false end
     local hum = char:FindFirstChild("Humanoid")
     if not hum then return false end
+    
     print("🚪 Exiting vehicle...")
+    
+    -- Method 1: Standard exit
     pcall(function()
         hum.Sit = false
         hum.Jump = true
     end)
     task.wait(0.3)
+    
+    -- Method 2: Force unsit if still in vehicle
+    if hum.Sit or hum.SeatPart then
+        print("⚠️ Still in vehicle - forcing exit...")
+        pcall(function()
+            if hum.SeatPart then
+                hum.SeatPart:Sit(nil)
+            end
+            hum.Sit = false
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end)
+        task.wait(0.2)
+    end
+    
+    -- Method 3: Teleport slightly up if still stuck
+    if hum.Sit or hum.SeatPart then
+        print("⚠️ Emergency teleport to exit vehicle")
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then
+            pcall(function()
+                root.CFrame = root.CFrame + Vector3.new(0, 10, 0)
+                root.AssemblyLinearVelocity = Vector3.zero
+                hum.Sit = false
+            end)
+            task.wait(0.2)
+        end
+    end
+    
     arrestState.inVehicle = false
     arrestState.currentVehicle = nil
+    
+    -- Reset camera
     pcall(function()
         local pHum = LP.Character and LP.Character:FindFirstChild("Humanoid")
         if pHum then
@@ -2077,26 +2008,82 @@ local function exitVehicle()
             Camera.CameraSubject = pHum
         end
     end)
+    
+    -- Equip handcuffs after exiting
     if not arrestState.handcuffsEquipped then
-        pcall(function()
-            for i = 1, 3 do
-                local ok = pcall(function()
-                    local args = { true }
-                    game:GetService("Players").LocalPlayer:WaitForChild("Folder"):WaitForChild("Handcuffs"):WaitForChild("InventoryEquipRemote"):FireServer(unpack(args))
-                end)
-                if ok then
-                    arrestState.handcuffsEquipped = true
-                    arrestState.lastEquipAttempt = tick()
-                    print("🔫 Equipping handcuffs (exit attempt " .. i .. ")")
-                    break
-                else
-                    print("⚠️ Equip attempt failed (exit) attempt " .. i)
-                end
-                task.wait(0.2)
+        print("🔫 Equipping handcuffs after vehicle exit...")
+        for i = 1, 3 do
+            equipHandcuffs()
+            task.wait(0.2)
+            if arrestState.handcuffsEquipped then
+                break
             end
-        end)
+        end
     end
+    
+    -- Ensure pistol is unequipped
+    pistolEquipped = false
+    
+    print("✅ Vehicle exit complete")
     return true
+end
+
+-- Attempts to pop vehicle tires using local remotes (best-effort)
+local function popVehicleTires(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    
+    -- Find target's vehicle
+    local vehiclesFolder = workspace:FindFirstChild("Vehicles")
+    if not vehiclesFolder then return false end
+    
+    local targetVehicle = nil
+    for _, vehicle in pairs(vehiclesFolder:GetChildren()) do
+        if vehicle:IsA("Model") then
+            for _, obj in pairs(vehicle:GetChildren()) do
+                if obj.Name:match("^_VehicleState_") then
+                    local playerName = obj.Name:gsub("^_VehicleState_", "")
+                    if playerName:lower() == targetPlayer.Name:lower() then
+                        targetVehicle = vehicle
+                        break
+                    end
+                end
+            end
+        end
+        if targetVehicle then break end
+    end
+    
+    if not targetVehicle then return false end
+    
+    -- Try to pop tires using remotes found in LocalPlayer.App
+    local success = pcall(function()
+        local app = LP:FindFirstChild("App")
+        if app then
+            for _, remote in pairs(app:GetDescendants()) do
+                if remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction") then
+                    pcall(function()
+                        if remote:IsA("RemoteEvent") then
+                            remote:FireServer(targetVehicle)
+                        else
+                            remote:InvokeServer(targetVehicle)
+                        end
+                    end)
+                    for _, part in pairs(targetVehicle:GetDescendants()) do
+                        if part.Name:lower():match("wheel") or part.Name:lower():match("tire") then
+                            pcall(function()
+                                if remote:IsA("RemoteEvent") then
+                                    remote:FireServer(part)
+                                else
+                                    remote:InvokeServer(part)
+                                end
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    
+    return success
 end
 
 local eCycleThread = nil
@@ -3100,17 +3087,11 @@ local function startArrestSystem()
                 local newTarget, distance = findNearestCriminal()
                 local fromWatch = false
                 if not newTarget then
-                    local wp, wdist, openingPos = getUncoveredWatchedPlayer()
+                    local wp, wdist = getUncoveredWatchedPlayer()
                     if wp then
                         newTarget = wp
                         distance = wdist
                         fromWatch = true
-
-                        -- Store opening position for approach strategy
-                        if openingPos then
-                            arrestState.coverOpeningPos = openingPos
-                            print("🎯 Will approach via cover opening at offset " .. math.floor((openingPos - wp.Character.HumanoidRootPart.Position).Magnitude) .. " studs")
-                        end
                     end
                 end
                 if newTarget then
@@ -3479,95 +3460,118 @@ local function startArrestSystem()
     if not isTargetValid(arrestState.targetPlayer) then
         arrestState.phase = "SCANNING"
         arrestState.targetPlayer = nil
-        arrestState.coverOpeningPos = nil
         stopECycle()
         return
     end
-
-    -- Continue shooting if target still in vehicle
-    if ArrestSettings.ShootVehicles and isTargetInVehicle() then
-        shootAtTarget()
+    
+    local targetRoot = arrestState.targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then
+        arrestState.phase = "SCANNING"
+        arrestState.targetPlayer = nil
+        stopECycle()
+        return
     end
-            if not isTargetValid(arrestState.targetPlayer) then
-                arrestState.phase = "SCANNING"
-                arrestState.targetPlayer = nil
-                stopECycle()
-                return
-            end
-            local targetRoot = arrestState.targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if not targetRoot then
-                arrestState.phase = "SCANNING"
-                arrestState.targetPlayer = nil
-                arrestState.coverOpeningPos = nil
-                stopECycle()
-                return
-            end
-            -- If we have a cover opening position, use it for approach
-            local approachPos = arrestState.coverOpeningPos or targetRoot.Position
-            local distance = (root.Position - approachPos).Magnitude
-            if distance < 100 and isInVehicle() then
-                print("🚪 Exiting vehicle")
-                if arrestState.originalCameraSubject then
-                    pcall(function()
-                        Camera.CameraType = arrestState.originalCameraType or Enum.CameraType.Custom
-                        Camera.CameraSubject = arrestState.originalCameraSubject
-                    end)
-                end
+    
+    local distance = (root.Position - targetRoot.Position).Magnitude
+    
+    -- IMPROVED: Check if target is in vehicle and handle accordingly
+    local targetInVehicle = isTargetInVehicle()
+    
+    if targetInVehicle then
+        -- Target is in vehicle
+        if distance < 50 then
+            -- Close enough - exit our vehicle and prepare to arrest
+            print("🚗 Target in vehicle but close - exiting to arrest")
+            if isInVehicle() then
                 exitVehicle()
-                task.wait(1)
-                if not arrestState.handcuffsEquipped then
-                    print("🔫 Equipping handcuffs after vehicle exit...")
-                    equipHandcuffs()
-                    task.wait(0.2)
-                    equipHandcuffs()
-                    task.wait(0.2)
-                    equipHandcuffs()
-                end
+                task.wait(0.5)
             end
-            local groundHeight = findGroundHeight(targetRoot.Position)
-            local targetHeight = math.max(targetRoot.Position.Y + 8, groundHeight + 6)
-            local descendY = targetHeight
-            local horizontalXZDist = Vector3.new(root.Position.X - targetRoot.Position.X, 0, root.Position.Z - targetRoot.Position.Z).Magnitude
-            if arrestState.justTeleportedAbove then
-                print("⚡ Performing instant drop to target location (was teleported above)")
-                performInstantDrop(targetRoot, descendY, true)
-                arrestState.justTeleportedAbove = nil
-            elseif horizontalXZDist <= (ArrestSettings.DescentAlignmentThreshold or 8) or arrestState.forceInstantDrop then
-                print("⚡ Instant vertical drop to target Y (preserving X,Z)")
-                performInstantDrop(targetRoot, descendY, false)
-                arrestState.forceInstantDrop = nil
+            
+            -- Switch to handcuffs
+            if pistolEquipped or not arrestState.handcuffsEquipped then
+                equipHandcuffs()
+                pistolEquipped = false
+                task.wait(0.2)
+            end
+            
+            -- Optional: Try to pop their tires
+            if ArrestSettings.ShootVehicles then
+                pcall(function() popVehicleTires(arrestState.targetPlayer) end)
+            end
+        else
+            -- Still far - continue shooting while in vehicle
+            if ArrestSettings.ShootVehicles then
+                shootAtTarget()
+            end
+        end
+    else
+        -- Target NOT in vehicle - switch to handcuffs if we have pistol
+        if pistolEquipped then
+            print("🔫 Target exited vehicle - switching to handcuffs")
+            equipHandcuffs()
+            pistolEquipped = false
+            task.wait(0.2)
+        end
+    end
+    
+    -- Exit our vehicle if too close
+    if distance < 100 and isInVehicle() then
+        print("🚪 Exiting vehicle (close to target)")
+        exitVehicle()
+        task.wait(0.5)
+    end
+    
+    -- Rest of dropping logic continues...
+    local groundHeight = findGroundHeight(targetRoot.Position)
+    local targetHeight = math.max(targetRoot.Position.Y + 8, groundHeight + 6)
+    local descendY = targetHeight
+    local horizontalXZDist = Vector3.new(root.Position.X - targetRoot.Position.X, 0, root.Position.Z - targetRoot.Position.Z).Magnitude
+    
+    if arrestState.justTeleportedAbove then
+        print("⚡ Performing instant drop to target location (was teleported above)")
+        performInstantDrop(targetRoot, descendY, true)
+        arrestState.justTeleportedAbove = nil
+    elseif horizontalXZDist <= (ArrestSettings.DescentAlignmentThreshold or 8) or arrestState.forceInstantDrop then
+        print("⚡ Instant vertical drop to target Y (preserving X,Z)")
+        performInstantDrop(targetRoot, descendY, false)
+        arrestState.forceInstantDrop = nil
+    else
+        if horizontalXZDist < (ArrestSettings.ReturnToFlyDistance or 500) then
+            flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, descendY, targetRoot.Position.Z), descendY)
+        else
+            local nearby, ndist = findNearbyCriminalAround(targetRoot.Position, 75)
+            if nearby then
+                print("🔁 Nearby criminal found (" .. nearby.Name .. ") within 75 studs - engaging directly at low altitude")
+                arrestState.targetPlayer = nearby
+                local altRoot = nearby.Character and nearby.Character:FindFirstChild("HumanoidRootPart")
+                if altRoot then
+                    flyHorizontalToPosition(Vector3.new(altRoot.Position.X, descendY, altRoot.Position.Z), descendY)
+                end
             else
-                if horizontalXZDist < (ArrestSettings.ReturnToFlyDistance or 500) then
-                    flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, descendY, targetRoot.Position.Z), descendY)
-                else
-                    local nearby, ndist = findNearbyCriminalAround(targetRoot.Position, 75)
-                    if nearby then
-                        print("🔁 Nearby criminal found (" .. nearby.Name .. ") within 75 studs - engaging directly at low altitude")
-                        arrestState.targetPlayer = nearby
-                        local altRoot = nearby.Character and nearby.Character:FindFirstChild("HumanoidRootPart")
-                        if altRoot then
-                            flyHorizontalToPosition(Vector3.new(altRoot.Position.X, descendY, altRoot.Position.Z), descendY)
-                        end
-                    else
-                        -- Suppressed noisy console print about target moving far away
-                        teleportVerticalTo(ArrestSettings.FlyAltitude)
-                        flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, ArrestSettings.FlyAltitude, targetRoot.Position.Z), ArrestSettings.FlyAltitude)
-                    end
-                end
+                teleportVerticalTo(ArrestSettings.FlyAltitude)
+                flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, ArrestSettings.FlyAltitude, targetRoot.Position.Z), ArrestSettings.FlyAltitude)
             end
-            if distance < ArrestSettings.ArrestRange then
-                arrestState.phase = "ARRESTING"
-                print("🚨 PHASE: ARRESTING!")
-                if not arrestState.handcuffsEquipped then
-                    print("🔫 Equipping handcuffs...")
-                    equipHandcuffs()
-                    task.wait(0.2)
-                    equipHandcuffs()
-                    task.wait(0.2)
-                    equipHandcuffs()
-                end
-                startECycle()
-            end
+        end
+    end
+    
+    -- Transition to arresting when close enough
+    if distance < ArrestSettings.ArrestRange then
+        arrestState.phase = "ARRESTING"
+        print("🚨 PHASE: ARRESTING!")
+        
+        -- Ensure handcuffs equipped
+        if not arrestState.handcuffsEquipped or pistolEquipped then
+            print("🔫 Equipping handcuffs for arrest...")
+            equipHandcuffs()
+            pistolEquipped = false
+            task.wait(0.2)
+            equipHandcuffs()
+            task.wait(0.2)
+            equipHandcuffs()
+        end
+        
+        startECycle()
+    end
         elseif arrestState.phase == "ARRESTING" then
             if not isTargetValid(arrestState.targetPlayer) then
                 print("✅ Target arrested or died!")
