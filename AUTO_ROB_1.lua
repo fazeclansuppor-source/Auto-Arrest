@@ -5,7 +5,7 @@
     FEATURES:
     - Auto-switches to Police team on startup
     - Auto-starts arrest system immediately
-    - Server hop DISABLED by default
+    - Server hop DISABLED by default. HIII
 ]]
 
 --// AUTO-EXECUTE ON SERVER HOP //--
@@ -20,12 +20,53 @@ pcall(function()
     getgenv().SFAA_SCRIPT_SOURCE = game:HttpGet(SCRIPT_URL or "https://raw.githubusercontent.com/fazeclansuppor-source/Auto-Arrest/refs/heads/main/AUTO_ROB_1.lua")
 end)
 
--- Prevent multiple instances from running concurrently
-if getgenv().SFAA_RUNNING then
-    print("⚠️ SFAA is already running in this environment — aborting duplicate instance.")
-    return
+-- Single-instance guard with heartbeat (prevents stale flags across teleports)
+local RUNNING_STALE_THRESHOLD = 20 -- seconds
+local runningHeartbeat = nil
+
+local function clearRunningFlag()
+    pcall(function()
+        getgenv().SFAA_RUNNING = false
+        getgenv().SFAA_RUNNING_HEARTBEAT = nil
+        getgenv().SFAA_RUNNING_TS = nil
+    end)
+    if runningHeartbeat then
+        pcall(function() task.cancel(runningHeartbeat) end)
+        runningHeartbeat = nil
+    end
 end
+
+local function startRunningHeartbeat()
+    if runningHeartbeat then return end
+    runningHeartbeat = task.spawn(function()
+        while getgenv().SFAA_RUNNING do
+            pcall(function()
+                getgenv().SFAA_RUNNING_HEARTBEAT = tick()
+                getgenv().SFAA_RUNNING_TS = os.time()
+            end)
+            task.wait(2)
+        end
+        pcall(function() getgenv().SFAA_RUNNING_HEARTBEAT = nil end)
+        runningHeartbeat = nil
+    end)
+end
+
+-- Decide whether to start or abort based on existing flag + heartbeat freshness
+if getgenv().SFAA_RUNNING then
+    local hb = getgenv().SFAA_RUNNING_HEARTBEAT
+    if hb and (tick() - hb) < RUNNING_STALE_THRESHOLD then
+        print("⚠️ SFAA is already running in this environment (active) — aborting duplicate instance.")
+        return
+    else
+        warn("⚠️ Detected stale SFAA_RUNNING flag (no recent heartbeat) - clearing and starting fresh")
+        clearRunningFlag()
+    end
+end
+
+-- Mark running and start heartbeat
 getgenv().SFAA_RUNNING = true
+pcall(function() getgenv().SFAA_RUNNING_TS = os.time() end)
+startRunningHeartbeat()
 
 LP.OnTeleport:Connect(function(State)
     if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
@@ -1047,7 +1088,7 @@ local function deepCleanupBeforeHop()
     print("✅ Deep cleanup complete")
 
     -- Clear running flag so a fresh instance can start in the new server
-    pcall(function() getgenv().SFAA_RUNNING = false end)
+    pcall(function() clearRunningFlag() end)
 end
 
 -- Simplified script queueing (minimal approach)
@@ -2115,7 +2156,7 @@ local function cleanupBeforeServerHop()
     print("✅ Cleanup complete")
 
     -- Clear running flag so a fresh instance can start (if desired)
-    pcall(function() getgenv().SFAA_RUNNING = false end)
+    pcall(function() clearRunningFlag() end)
 end
 
 -- Simplified queue function with better executor compatibility
@@ -3213,7 +3254,7 @@ local function stopArrestSystem()
     print("✅ System fully stopped - movement restored!")
 
     -- Clear running flag so a fresh instance can start later if needed
-    pcall(function() getgenv().SFAA_RUNNING = false end)
+    pcall(function() clearRunningFlag() end)
 end
 
 local function initializeCharacterConnection()
