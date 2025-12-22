@@ -47,8 +47,8 @@ print("🚔 SFAA V8.0 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
 print(string.rep("=", 70))
 
 -- Safety: wait a short period at script start so the client and PlayerGui can fully initialize
-print("⏳ Waiting 6s for client to initialize before starting...")
-task.wait(6)
+print("⏳ Waiting 10s for client to initialize before starting...")
+task.wait(10)
 print("✅ Initial wait complete, proceeding...")
 
 --// SIMPLE GUI BUTTON CLICKER - NO REMOTES //--
@@ -421,6 +421,9 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
                     local radius = (ArrestSettings and ArrestSettings.UFOBunkerRadius) or 250
                     if dist and dist <= radius then
                         print("✅ Spawned at Military Base after attempt " .. attempt)
+                        -- Successful spawn; clear death tracking
+                        deathCount = 0
+                        lastDeathTime = 0
                         return true
                     else
                         print("⚠️ Not close enough to military base; attempting forced death and retry...")
@@ -463,6 +466,9 @@ local function ensureSpawnAtMilitaryOrClearDoor(maxAttempts, attemptDelay)
         -- attempts exhausted
         if (ArrestSettings and ArrestSettings.ServerHopEnabled) then
             print("🔄 Spawn attempts failed after " .. maxAttempts .. " attempts; server hopping as fallback")
+            -- Reset death counter before hopping
+            deathCount = 0
+            lastDeathTime = 0
             pcall(serverHop)
         else
             print("⚠️ Spawn attempts failed after " .. maxAttempts .. " attempts and ServerHop disabled")
@@ -479,15 +485,25 @@ end
 
 -- SWITCH TO POLICE IMMEDIATELY AT STARTUP
 print("⚡ AUTO-SWITCHING TO POLICE TEAM...")
-clickPoliceButton()
--- Wait up to 6s for the team change to apply to avoid running spawn logic too early
-local switchTimeout = 6
-local switchStart = tick()
-while tick() - switchStart < switchTimeout do
-    if LP.Team and (LP.Team.Name == "Police" or LP.Team.Name == "Cop") then break end
-    task.wait(0.2)
+print("⏳ Ensuring team is set to Police (will retry until successful)...")
+-- Keep trying to switch to Police until the local player's team is Police/Cop
+local function ensureTeamIsPolice()
+    while true do
+        local teamName = (LP.Team and LP.Team.Name) or "None"
+        if teamName == "Police" or teamName == "Cop" then
+            print("🎉 Team is now: " .. teamName)
+            break
+        end
+        local ok, err = pcall(clickPoliceButton)
+        if not ok then
+            warn("⚠️ clickPoliceButton error: ", err)
+        end
+        -- Short settle between attempts
+        task.wait(0.6)
+    end
 end
--- extra small settle wait
+ensureTeamIsPolice()
+-- small settle wait after successful switch
 task.wait(0.5)
 print("✅ Team switch complete - checking spawn location...")
 
@@ -543,6 +559,9 @@ local ArrestSettings = {
     SpawnAttemptBackoff = 1.0, -- incremental backoff added per attempt
     SpawnAttemptSettleTime = 1.0, -- wait after LoadCharacter before checking position
     SpawnDeathCooldown = 3, -- seconds to wait between forced deaths to prevent rapid respawns
+    -- If killed repeatedly by external sources, hop after this many deaths within the window
+    DeathsBeforeServerHop = 6,
+    DeathsWindowSeconds = 60,
     ServerHopEnabled = true, -- ENABLED BY DEFAULT
     ServerHopDelay = 2,
     AutoStartAfterHop = false,
@@ -631,6 +650,9 @@ local characterConnection = nil
 local spawnAttemptInProgress = false
 -- Track last forced death time to prevent rapid repeated killing
 local lastForcedDeathTime = 0
+-- Track recent death counts to decide when to server-hop
+local deathCount = 0
+local lastDeathTime = 0
 
 --// UTILITY FUNCTIONS //--
 local function getMoney()
@@ -1578,8 +1600,31 @@ local function onCharacterAdded(character)
     end
     if hum then
         deathConnection = hum.Died:Connect(function()
-            lastForcedDeathTime = tick()
-            print("💀 Player died - attempting to respawn at Military Base repeatedly...")
+            local now = tick()
+            local window = (ArrestSettings and ArrestSettings.DeathsWindowSeconds) or 60
+            if (now - (lastDeathTime or 0)) > window then
+                deathCount = 1
+            else
+                deathCount = (deathCount or 0) + 1
+            end
+            lastDeathTime = now
+            lastForcedDeathTime = now
+            print("💀 Player died - resetting state... (death count: " .. tostring(deathCount) .. ")")
+
+            local threshold = (ArrestSettings and ArrestSettings.DeathsBeforeServerHop) or 6
+            if deathCount >= threshold then
+                if ArrestSettings.ServerHopEnabled then
+                    print("🔄 Death threshold reached (" .. tostring(deathCount) .. ") - server hopping to escape repeated kills")
+                    deathCount = 0
+                    lastDeathTime = 0
+                    task.spawn(function() pcall(serverHop) end)
+                else
+                    print("⚠️ Death threshold reached but ServerHop is disabled")
+                end
+                resetArrestState()
+                return
+            end
+
             -- Spawn attempts run in a background thread so we don't block the death event
             task.spawn(function()
                 ensureSpawnAtMilitaryOrClearDoor(6)
