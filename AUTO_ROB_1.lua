@@ -592,6 +592,10 @@ local ArrestSettings = {
     StuckServerHopCooldown = 30,
     -- If true, repeated deaths (loop death) will force an immediate server hop
     LoopDeathServerHop = true,
+    -- High-bounty cover behavior: wait for covered high-bounty players before hopping
+    CoverHighBountyEnabled = true,
+    CoverHighBountyWaitDuration = 20, -- seconds to wait for a high-bounty target to leave cover
+    CoverHighBountyForceHop = true,  -- if they don't leave cover, force a server hop
 } 
 
 -- Persisted settings file
@@ -1029,7 +1033,35 @@ local function getUncoveredWatchedPlayer()
     return nil
 end
 
-local function findNearbyCriminalAround(position, radius) 
+-- Find a high-bounty player who is currently under cover (from the watchlist).
+-- Returns player, distance (or nil) based on TargetMode/nearest/highest-bounty
+local function findHighBountyCoverCandidate(myRoot)
+    if not myRoot then return nil end
+    local bestPlayer, bestDist, bestBounty = nil, math.huge, -1
+    for userId, seenAt in pairs(arrestState.coverWatchlist) do
+        local player = P:GetPlayerByUserId(userId)
+        if player and isTargetValid(player) then
+            local bounty = getPlayerBounty(player) or 0
+            if bounty >= (ArrestSettings and ArrestSettings.BountyThreshold or 0) then
+                local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if root then
+                    local dist = (myRoot.Position - root.Position).Magnitude
+                    if ArrestSettings.TargetMode == "highest bounty" then
+                        if bounty > bestBounty then bestBounty = bounty; bestPlayer = player; bestDist = dist end
+                    else
+                        if dist < bestDist then bestPlayer = player; bestDist = dist; bestBounty = bounty end
+                    end
+                end
+            end
+        else
+            -- stale entry - remove
+            arrestState.coverWatchlist[userId] = nil
+        end
+    end
+    return bestPlayer, bestDist
+end
+
+local function findNearbyCriminalAround(position, radius)  
     radius = radius or 75
     for _, player in ipairs(P:GetPlayers()) do
         if isTargetValid(player) and player ~= arrestState.targetPlayer then
@@ -2112,27 +2144,99 @@ local function startArrestSystem()
                         end
                     end
                 else
-                    if ArrestSettings.ServerHopEnabled then
-                        if not arrestState.noTargetsStartTime then
-                            arrestState.noTargetsStartTime = tick()
-                            if ArrestSettings.BountyFilterEnabled then
-                                print("⏳ No valid targets found (all criminals have bounty < " .. ArrestSettings.BountyThreshold .. " or are under cover)")
+                    -- Handle high-bounty players who are under cover: wait for them briefly before hopping
+                    local covDur = (ArrestSettings and ArrestSettings.CoverHighBountyWaitDuration) or 20
+                    local covEnabled = (ArrestSettings and ArrestSettings.CoverHighBountyEnabled) ~= false
+                    if not newTarget then
+                        if arrestState.coverWaitPlayer then
+                            local wp = arrestState.coverWaitPlayer
+                            if not isTargetValid(wp) then
+                                arrestState.coverWaitPlayer = nil
+                                arrestState.coverWaitStart = nil
                             else
-                                print("⏳ No valid targets found")
+                                if not isPlayerUnderCover(wp) then
+                                    print("✅ Watched target came out of cover: " .. wp.Name .. " — selecting target")
+                                    local rootPart = wp.Character and wp.Character:FindFirstChild("HumanoidRootPart")
+                                    if rootPart then
+                                        newTarget = wp
+                                        distance = (root.Position - rootPart.Position).Magnitude
+                                    end
+                                    arrestState.coverWaitPlayer = nil
+                                    arrestState.coverWaitStart = nil
+                                else
+                                    if tick() - (arrestState.coverWaitStart or 0) >= covDur then
+                                        print("⚠️ High-bounty target " .. wp.Name .. " did not leave cover within " .. covDur .. "s")
+                                        arrestState.coverWaitPlayer = nil
+                                        arrestState.coverWaitStart = nil
+                                        if (ArrestSettings and ArrestSettings.CoverHighBountyForceHop) then
+                                            print("🔄 Forcing server hop due to persistent high-bounty cover")
+                                            deathCount = 0
+                                            lastDeathTime = 0
+                                            task.spawn(function() pcall(serverHop) end)
+                                        end
+                                    end
+                                end
                             end
-                            print("⏳ Server hop timer started - will hop in " .. ArrestSettings.ServerHopDelay .. "s if no targets appear...")
                         else
-                            local timeWithoutTargets = tick() - arrestState.noTargetsStartTime
-                            if timeWithoutTargets >= ArrestSettings.ServerHopDelay then
-                                print("🔄 No targets for " .. ArrestSettings.ServerHopDelay .. "s - Server hopping!")
-                                serverHop()
+                            if covEnabled then
+                                local candidate, cdist = findHighBountyCoverCandidate(root)
+                                if candidate then
+                                    arrestState.coverWaitPlayer = candidate
+                                    arrestState.coverWaitStart = tick()
+                                    -- clear any no-target timer while waiting
+                                    arrestState.noTargetsStartTime = nil
+                                    print("⏳ High-bounty target under cover: waiting " .. covDur .. "s for " .. candidate.Name .. " to leave cover...")
+                                else
+                                    -- no high-bounty cover candidates; fallback to normal no-target server hop timer
+                                    if ArrestSettings.ServerHopEnabled then
+                                        if not arrestState.noTargetsStartTime then
+                                            arrestState.noTargetsStartTime = tick()
+                                            if ArrestSettings.BountyFilterEnabled then
+                                                print("⏳ No valid targets found (all criminals have bounty < " .. ArrestSettings.BountyThreshold .. " or are under cover)")
+                                            else
+                                                print("⏳ No valid targets found")
+                                            end
+                                            print("⏳ Server hop timer started - will hop in " .. ArrestSettings.ServerHopDelay .. "s if no targets appear...")
+                                        else
+                                            local timeWithoutTargets = tick() - arrestState.noTargetsStartTime
+                                            if timeWithoutTargets >= ArrestSettings.ServerHopDelay then
+                                                print("🔄 No targets for " .. ArrestSettings.ServerHopDelay .. "s - Server hopping!")
+                                                serverHop()
+                                            end
+                                        end
+                                    else
+                                        if ArrestSettings.BountyFilterEnabled then
+                                            print("⏳ No valid targets found (all criminals have bounty < " .. ArrestSettings.BountyThreshold .. " or are under cover)")
+                                        else
+                                            print("⏳ No valid targets found")
+                                        end
+                                    end
+                                end
+                            else
+                                if ArrestSettings.ServerHopEnabled then
+                                    if not arrestState.noTargetsStartTime then
+                                        arrestState.noTargetsStartTime = tick()
+                                        if ArrestSettings.BountyFilterEnabled then
+                                            print("⏳ No valid targets found (all criminals have bounty < " .. ArrestSettings.BountyThreshold .. " or are under cover)")
+                                        else
+                                            print("⏳ No valid targets found")
+                                        end
+                                        print("⏳ Server hop timer started - will hop in " .. ArrestSettings.ServerHopDelay .. "s if no targets appear...")
+                                    else
+                                        local timeWithoutTargets = tick() - arrestState.noTargetsStartTime
+                                        if timeWithoutTargets >= ArrestSettings.ServerHopDelay then
+                                            print("🔄 No targets for " .. ArrestSettings.ServerHopDelay .. "s - Server hopping!")
+                                            serverHop()
+                                        end
+                                    end
+                                else
+                                    if ArrestSettings.BountyFilterEnabled then
+                                        print("⏳ No valid targets found (all criminals have bounty < " .. ArrestSettings.BountyThreshold .. " or are under cover)")
+                                    else
+                                        print("⏳ No valid targets found")
+                                    end
+                                end
                             end
-                        end
-                    else
-                        if ArrestSettings.BountyFilterEnabled then
-                            print("⏳ No valid targets found (all criminals have bounty < " .. ArrestSettings.BountyThreshold .. " or are under cover)")
-                        else
-                            print("⏳ No valid targets found")
                         end
                     end
                 end
