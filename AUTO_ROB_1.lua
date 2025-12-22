@@ -487,7 +487,51 @@ local ArrestSettings = {
     AutoStartAfterHop = false,
 }
 
+-- Persisted settings file
+local SETTINGS_FILE = "SFAA_settings.json"
+
+local function saveSettings()
+    local ok, err = pcall(function()
+        local data = {}
+        for k, v in pairs(ArrestSettings) do
+            data[k] = v
+        end
+        local json = HttpService:JSONEncode(data)
+        if writefile then
+            writefile(SETTINGS_FILE, json)
+        elseif syn and syn.write_file then
+            syn.write_file(SETTINGS_FILE, json)
+        else
+            -- Fallback to global table for executors without file APIs
+            getgenv().SFAA_SAVED_SETTINGS = json
+        end
+    end)
+    if not ok then warn("⚠️ saveSettings failed:", err) end
+end
+
+local function loadSettings()
+    local success, json
+    if isfile and readfile and isfile(SETTINGS_FILE) then
+        success, json = pcall(function() return readfile(SETTINGS_FILE) end)
+    elseif syn and syn.read_file and syn.file_exists and syn.file_exists(SETTINGS_FILE) then
+        success, json = pcall(function() return syn.read_file(SETTINGS_FILE) end)
+    elseif getgenv().SFAA_SAVED_SETTINGS then
+        success, json = true, getgenv().SFAA_SAVED_SETTINGS
+    end
+    if success and type(json) == "string" and json ~= "" then
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(json) end)
+        if ok and type(decoded) == "table" then
+            for k, v in pairs(decoded) do
+                -- Only set keys that already exist to avoid unexpected injection
+                if ArrestSettings[k] ~= nil then ArrestSettings[k] = v end
+            end
+            print("✅ Loaded saved settings")
+        end
+    end
+end
+
 --// ARREST STATE //--
+loadSettings()
 local arrestState = {
     active = false,
     targetPlayer = nil,
@@ -2184,6 +2228,7 @@ CloseBtn.MouseButton1Click:Connect(function()
         ArrestSettings.Enabled = false
         stopArrestSystem()
     end
+    saveSettings()
     ScreenGui:Destroy()
     print("👋 SFAA GUI Closed")
 end)
@@ -2428,7 +2473,7 @@ CooldownLabel.BackgroundTransparency = 1
 CooldownLabel.Position = UDim2.new(0, 12, 0, 132)
 CooldownLabel.Size = UDim2.new(1, -24, 0, 14)
 CooldownLabel.Font = Enum.Font.Gotham
-CooldownLabel.Text = "arrest cooldown: 0.0"
+CooldownLabel.Text = "vehicle respawn: 0.0"
 CooldownLabel.TextColor3 = Color3.fromRGB(120, 130, 150)
 CooldownLabel.TextSize = 11
 CooldownLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -2608,6 +2653,7 @@ BountyInput.FocusLost:Connect(function()
     if n and n >= 0 then
         ArrestSettings.BountyThreshold = n
         BountyInput.Text = tostring(ArrestSettings.BountyThreshold)
+        saveSettings()
         print("💰 Bounty threshold set to: $" .. ArrestSettings.BountyThreshold)
         if ArrestSettings.Enabled then
             ToggleBtn.Text = "ACTIVE - Min: $" .. ArrestSettings.BountyThreshold
@@ -2621,6 +2667,7 @@ CharSpeedInput.FocusLost:Connect(function()
     local n = tonumber(CharSpeedInput.Text)
     if n and n > 0 then
         ArrestSettings.CharacterFlySpeed = n
+        saveSettings()
     else
         CharSpeedInput.Text = tostring(ArrestSettings.CharacterFlySpeed)
     end
@@ -2630,6 +2677,7 @@ VehSpeedInput.FocusLost:Connect(function()
     local n = tonumber(VehSpeedInput.Text)
     if n and n > 0 then
         ArrestSettings.VehicleFlySpeed = n
+        saveSettings()
     else
         VehSpeedInput.Text = tostring(ArrestSettings.VehicleFlySpeed)
     end
@@ -2645,6 +2693,7 @@ ServerHopToggle.MouseButton1Click:Connect(function()
         arrestState.noTargetsStartTime = nil
         print("🔄 Server hop disabled")
     end
+    saveSettings()
 end)
 
 local lastUIUpdate = 0
@@ -2657,7 +2706,7 @@ spawn(function()
         end
         lastUIUpdate = currentTime
         local cooldown = getSpawnCooldownRemaining()
-        CooldownLabel.Text = "arrest cooldown: " .. string.format("%.1f", cooldown)
+        CooldownLabel.Text = "vehicle respawn: " .. string.format("%.1f", cooldown)
         local avgSpeed = (ArrestSettings.CharacterFlySpeed + ArrestSettings.VehicleFlySpeed) / 2
         local percent = (avgSpeed / 300) * 100
         SpeedPercent.Text = string.format("%.2f%%", percent)
@@ -2690,7 +2739,17 @@ print("")
 
 -- AUTO-START AFTER GUI LOADS
 print("⚡ AUTO-STARTING ARREST SYSTEM...")
-task.wait(1)
+-- Wait for LocalPlayer and PlayerGui to be ready to avoid running too early
+local playersSvc = game:GetService("Players")
+local localP = playersSvc.LocalPlayer
+local waited = 0
+while (not localP or not localP.Parent or not localP:FindFirstChild("PlayerGui")) and waited < 30 do
+    task.wait(0.5)
+    waited = waited + 0.5
+    localP = playersSvc.LocalPlayer
+end
+-- Proceed with startup
+task.wait(0.5)
 ArrestSettings.Enabled = true
 arrestState.phase = "SCANNING"
 arrestState.startMoney = getMoney()
