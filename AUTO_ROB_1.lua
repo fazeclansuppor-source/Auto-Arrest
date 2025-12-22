@@ -44,47 +44,20 @@ if isVolcanoExecutor() and not getgenv().SFAA_CAPTURED_BY_VOLCANO then
     end
 end
 
--- Robust OnTeleport attachment: LocalPlayer may be nil at execute time in some environments.
-local function attachOnTeleportForPlayer(player)
-    if not player or not player.OnTeleport then return end
-    pcall(function()
-        player.OnTeleport:Connect(function(State)
-            if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
-                TeleportCheck = true
-                local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
-                -- Only queue if we have a captured script source (captured at execute-time on Volcano)
-                if getgenv().SFAA_SCRIPT_SOURCE and getgenv().SFAA_SCRIPT_SOURCE ~= "" then
-                    local ok2 = pcall(function()
-                        queueFunc(getgenv().SFAA_SCRIPT_SOURCE)
-                    end)
-                    if ok2 then
-                        print("✅ SFAA queued for auto-execution in new server!")
-                    else
-                        warn("⚠️ Failed to queue SFAA for next server")
-                    end
-                else
-                    warn("⚠️ No captured script source available; skipping queue to avoid broken reload")
-                end
-            end
+LP.OnTeleport:Connect(function(State)
+    if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
+        TeleportCheck = true
+        local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
+        local success = pcall(function()
+            queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
         end)
-    end)
-end
-
--- Try to attach immediately; otherwise wait for PlayerAdded
-local lp = Players.LocalPlayer
-if lp then
-    attachOnTeleportForPlayer(lp)
-else
-    local conn
-    conn = Players.PlayerAdded:Connect(function(p)
-        if Players.LocalPlayer then
-            pcall(function()
-                attachOnTeleportForPlayer(Players.LocalPlayer)
-            end)
-            conn:Disconnect()
+        if success then
+            print("✅ SFAA queued for auto-execution in new server!")
+        else
+            warn("⚠️ Failed to queue SFAA for next server")
         end
-    end)
-end
+    end
+end)
 
 local P = game:GetService("Players")
 local W = game:GetService("Workspace")
