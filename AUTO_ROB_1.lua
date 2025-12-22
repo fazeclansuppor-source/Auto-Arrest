@@ -68,6 +68,10 @@ print("⏳ Waiting " .. tostring(SFAA_Config.InitialClientWait) .. "s for client
 task.wait(SFAA_Config.InitialClientWait)
 print("✅ Initial wait complete, proceeding...")
 
+-- Script start timestamp (used for uptime display)
+local SFAA_StartTick = tick()
+local SFAA_StartTime = os.time()
+
 --// SIMPLE GUI BUTTON CLICKER - NO REMOTES //--
 local function getCurrentTeam()
     if LP.Team then return LP.Team.Name end
@@ -701,6 +705,15 @@ local function computeHourlyRate(windowSeconds)
 end
 
 loadEarnings()
+
+-- Uptime helper (HH:MM:SS)
+local function formatUptime(seconds)
+    local s = math.floor(tonumber(seconds) or 0)
+    local hours = math.floor(s / 3600)
+    local mins = math.floor((s % 3600) / 60)
+    local secs = s % 60
+    return string.format("%02d:%02d:%02d", hours, mins, secs)
+end
 
 local arrestState = {
     active = false,
@@ -2794,27 +2807,38 @@ local ServerHopCorner = Instance.new("UICorner")
 ServerHopCorner.CornerRadius = UDim.new(0, 3)
 ServerHopCorner.Parent = ServerHopToggle
 
-local ServerHopLabel = Instance.new("TextLabel")
-ServerHopLabel.Parent = OtherSection
-ServerHopLabel.BackgroundTransparency = 1
-ServerHopLabel.Position = UDim2.new(0, 32, 0, 33)
-ServerHopLabel.Size = UDim2.new(1, -44, 0, 18)
-ServerHopLabel.Font = Enum.Font.Gotham
-ServerHopLabel.Text = "serverhop (4-8 slots left, disabled)"
-ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
-ServerHopLabel.TextSize = 11
-ServerHopLabel.TextXAlignment = Enum.TextXAlignment.Left
+local UptimeLabel = Instance.new("TextLabel")
+UptimeLabel.Parent = OtherSection
+UptimeLabel.BackgroundTransparency = 1
+UptimeLabel.Position = UDim2.new(0, 32, 0, 6)
+UptimeLabel.Size = UDim2.new(1, -44, 0, 14)
+UptimeLabel.Font = Enum.Font.Gotham
+UptimeLabel.Text = "Uptime: 00:00:00"
+UptimeLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+UptimeLabel.TextSize = 11
+UptimeLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 local EarningsLabel = Instance.new("TextLabel")
 EarningsLabel.Parent = OtherSection
 EarningsLabel.BackgroundTransparency = 1
-EarningsLabel.Position = UDim2.new(0, 32, 0, 10)
-EarningsLabel.Size = UDim2.new(1, -44, 0, 18)
+EarningsLabel.Position = UDim2.new(0, 32, 0, 24)
+EarningsLabel.Size = UDim2.new(1, -44, 0, 14)
 EarningsLabel.Font = Enum.Font.Gotham
 EarningsLabel.Text = "Est $/hr: calculating..."
 EarningsLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
 EarningsLabel.TextSize = 11
 EarningsLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local ServerHopLabel = Instance.new("TextLabel")
+ServerHopLabel.Parent = OtherSection
+ServerHopLabel.BackgroundTransparency = 1
+ServerHopLabel.Position = UDim2.new(0, 32, 0, 40)
+ServerHopLabel.Size = UDim2.new(1, -44, 0, 14)
+ServerHopLabel.Font = Enum.Font.Gotham
+ServerHopLabel.Text = "serverhop (4-8 slots left, disabled)"
+ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+ServerHopLabel.TextSize = 11
+ServerHopLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 local dragging, dragInput, dragStart, startPos
 
@@ -2940,6 +2964,12 @@ spawn(function()
             ServerHopLabel.Text = "Serverhop"
             ServerHopLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
         end
+
+        -- Update uptime display
+        local uptimeSec = math.max(0, tick() - (SFAA_StartTick or tick()))
+        pcall(function()
+            UptimeLabel.Text = "Uptime: " .. formatUptime(uptimeSec)
+        end)
 
         -- Update earnings rate display (last 1 hour by default)
         local hourly, samples = computeHourlyRate(3600)
