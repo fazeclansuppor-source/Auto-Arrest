@@ -5,7 +5,7 @@
     FEATURES:
     - Auto-switches to Police team on startup
     - Auto-starts arrest system immediately
-    - Server hop DISABLED by default space jam
+    - Server hop DISABLED by default
 ]]
 
 --// AUTO-EXECUTE ON SERVER HOP //--
@@ -738,7 +738,13 @@ local ArrestSettings = {
     CoverHighBountyEnabled = true,
     CoverHighBountyWaitDuration = 20, -- seconds to wait for a high-bounty target to leave cover
     CoverHighBountyForceHop = true,  -- if they don't leave cover, force a server hop
-} 
+
+    -- Vehicle shooting settings
+    ShootVehicles = true,                    -- Enable/disable vehicle shooting
+    ShootInterval = 0.15,                    -- Time between shots (seconds)
+    ShootRange = 200,                        -- Max range to shoot vehicles (studs)
+    AutoSwitchWeapons = true,                -- Auto-switch between pistol and handcuffs
+}  
 
 -- Persisted settings file
 local SETTINGS_FILE = "SFAA_settings.json"
@@ -943,6 +949,11 @@ local arrestState = {
     coverWatchlist = {},
     noTargetsStartTime = nil,
 } 
+
+-- Vehicle shooting runtime state
+local pistolEquipped = false
+local lastPistolShot = 0
+local shootingThread = nil
 
 --// MAIN CONNECTIONS //--
 local mainConnection = nil
@@ -1648,6 +1659,125 @@ local function equipHandcuffs(retries)
     -- Final attempt failed, log once
     warn("⚠️ equipHandcuffs: failed to equip handcuffs after " .. retries .. " attempts")
     return false
+end
+
+-- Pistol equip and vehicle-shooting helpers
+local function equipPistol(retries)
+    retries = retries or 3
+    for i = 1, retries do
+        local currentTime = tick()
+        if currentTime - arrestState.lastEquipAttempt < 0.45 then
+            task.wait(0.45)
+        end
+        arrestState.lastEquipAttempt = tick()
+        local ok = false
+        pcall(function()
+            local args = {true}
+            local folder = LP:FindFirstChild("Folder")
+            if folder then
+                local pistol = folder:FindFirstChild("Pistol")
+                if pistol and pistol:FindFirstChild("InventoryEquipRemote") then
+                    pistol.InventoryEquipRemote:FireServer(unpack(args))
+                    ok = true
+                else
+                    -- Try direct remote if structure differs
+                    local rem = folder:FindFirstChildWhichIsA("RemoteEvent") or folder:FindFirstChild("InventoryEquipRemote")
+                    if rem and rem.FireServer then
+                        rem:FireServer(unpack(args))
+                        ok = true
+                    end
+                end
+            end
+        end)
+        if ok then
+            pistolEquipped = true
+            arrestState.handcuffsEquipped = false
+            return true
+        end
+        task.wait(0.2)
+    end
+    warn("⚠️ equipPistol: failed to equip pistol after " .. retries .. " attempts")
+    return false
+end
+
+local function isTargetInVehicle()
+    if not arrestState.targetPlayer then return false end
+    local char = arrestState.targetPlayer.Character
+    if not char then return false end
+    
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum then return false end
+    
+    -- Check if sitting (in vehicle)
+    return hum.Sit or hum.SeatPart ~= nil
+end
+
+local function shootAtTarget()
+    if not ArrestSettings.ShootVehicles then return end
+    if not arrestState.targetPlayer then return end
+    if not isTargetInVehicle() then return end
+    
+    local now = tick()
+    if now - lastPistolShot < (ArrestSettings.ShootInterval or 0.15) then
+        return
+    end
+    
+    local char = LP.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    local targetRoot = arrestState.targetPlayer.Character and arrestState.targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return end
+    
+    local distance = (root.Position - targetRoot.Position).Magnitude
+    if distance > (ArrestSettings.ShootRange or 200) then return end
+    
+    -- Ensure pistol is equipped
+    if not pistolEquipped then
+        equipPistol()
+        task.wait(0.2)
+    end
+    
+    -- Fire pistol (best-effort)
+    pcall(function()
+        local folder = LP:FindFirstChild("Folder")
+        if folder then
+            local pistol = folder:FindFirstChild("Pistol")
+            if pistol then
+                local shootRemote = pistol:FindFirstChild("Shoot")
+                if shootRemote and shootRemote.FireServer then
+                    shootRemote:FireServer()
+                    lastPistolShot = now
+                    -- print("🔫 Shooting at vehicle (distance: " .. math.floor(distance) .. " studs)")
+                end
+            end
+        end
+    end)
+end
+
+local function startVehicleShooting()
+    if shootingThread then return end
+    if not ArrestSettings.ShootVehicles then return end
+    
+    shootingThread = task.spawn(function()
+        while ArrestSettings.ShootVehicles and ArrestSettings.Enabled do
+            if arrestState.targetPlayer and isTargetInVehicle() then
+                if arrestState.phase == "FLYING" or arrestState.phase == "DROPPING" then
+                    shootAtTarget()
+                end
+            end
+            task.wait(ArrestSettings.ShootInterval or 0.15)
+        end
+    end)
+end
+
+local function stopVehicleShooting()
+    if shootingThread then
+        task.cancel(shootingThread)
+        shootingThread = nil
+    end
+    pistolEquipped = false
 end
 
 local function getVehicle()
@@ -2589,6 +2719,12 @@ local function startArrestSystem()
     print("🔄 Server Hop: " .. (ArrestSettings.ServerHopEnabled and "ENABLED (targets 4-8 slots)" or "DISABLED"))
     displayAllBounties()
     
+    -- Start vehicle shooting thread
+    print("🔫 Vehicle Shooting: " .. (ArrestSettings.ShootVehicles and "ENABLED" or "DISABLED"))
+    if ArrestSettings.ShootVehicles then
+        startVehicleShooting()
+    end
+
     mainConnection = R.Heartbeat:Connect(function()
         if not ArrestSettings.Enabled then
             if mainConnection then
@@ -3116,6 +3252,24 @@ local function startArrestSystem()
                 print("✈️ PHASE: Flying (speed: " .. speed .. ")")
             end
         elseif arrestState.phase == "FLYING" then
+    if not isTargetValid(arrestState.targetPlayer) then
+        arrestState.phase = "SCANNING"
+        arrestState.targetPlayer = nil
+        return
+    end
+
+    -- Auto-switch to pistol if target is in vehicle and shooting is enabled
+    if ArrestSettings.ShootVehicles and ArrestSettings.AutoSwitchWeapons then
+        if isTargetInVehicle() and not pistolEquipped then
+            print("🔫 Target in vehicle - switching to pistol")
+            equipPistol()
+        elseif not isTargetInVehicle() and pistolEquipped then
+            -- Switch back to handcuffs when target exits vehicle
+            print("🔫 Target exited vehicle - switching to handcuffs")
+            equipHandcuffs()
+            pistolEquipped = false
+        end
+    end
             if not isTargetValid(arrestState.targetPlayer) then
                 arrestState.phase = "SCANNING"
                 arrestState.targetPlayer = nil
@@ -3154,6 +3308,17 @@ local function startArrestSystem()
                 end
             end
         elseif arrestState.phase == "DROPPING" then
+    if not isTargetValid(arrestState.targetPlayer) then
+        arrestState.phase = "SCANNING"
+        arrestState.targetPlayer = nil
+        stopECycle()
+        return
+    end
+
+    -- Continue shooting if target still in vehicle
+    if ArrestSettings.ShootVehicles and isTargetInVehicle() then
+        shootAtTarget()
+    end
             if not isTargetValid(arrestState.targetPlayer) then
                 arrestState.phase = "SCANNING"
                 arrestState.targetPlayer = nil
@@ -3288,6 +3453,9 @@ local function stopArrestSystem()
     end)
     pcall(function()
         stopEquipSpam()
+    end)
+    pcall(function()
+        stopVehicleShooting()
     end)
     pcall(function()
         local char = LP.Character
@@ -3731,7 +3899,7 @@ OtherSection.Parent = MainFrame
 OtherSection.BackgroundColor3 = Color3.fromRGB(20, 24, 32)
 OtherSection.BorderSizePixel = 0
 OtherSection.Position = UDim2.new(0, 15, 0, 412)
-OtherSection.Size = UDim2.new(1, -30, 0, 60)
+OtherSection.Size = UDim2.new(1, -30, 0, 75)  -- increased to fit Vehicle Shoot toggle
 
 local OtherSectionCorner = Instance.new("UICorner")
 OtherSectionCorner.CornerRadius = UDim.new(0, 8)
@@ -3921,6 +4089,45 @@ ServerHopToggle.MouseButton1Click:Connect(function()
         ServerHopToggle.BackgroundColor3 = Color3.fromRGB(60, 65, 80)
         arrestState.noTargetsStartTime = nil
         print("🔄 Server hop disabled")
+    end
+    saveSettings()
+end)
+
+-- Vehicle Shooting Toggle
+local VehicleShootToggle = Instance.new("TextButton")
+VehicleShootToggle.Parent = OtherSection
+VehicleShootToggle.BackgroundColor3 = ArrestSettings.ShootVehicles and Color3.fromRGB(70, 180, 100) or Color3.fromRGB(60, 65, 80)
+VehicleShootToggle.Position = UDim2.new(0, 12, 0, 20)
+VehicleShootToggle.Size = UDim2.new(0, 14, 0, 14)
+VehicleShootToggle.Text = ""
+VehicleShootToggle.BorderSizePixel = 0
+VehicleShootToggle.AutoButtonColor = false
+
+local VehicleShootCorner = Instance.new("UICorner")
+VehicleShootCorner.CornerRadius = UDim.new(0, 3)
+VehicleShootCorner.Parent = VehicleShootToggle
+
+local VehicleShootLabel = Instance.new("TextLabel")
+VehicleShootLabel.Parent = OtherSection
+VehicleShootLabel.BackgroundTransparency = 1
+VehicleShootLabel.Position = UDim2.new(0, 32, 0, 18)
+VehicleShootLabel.Size = UDim2.new(1, -44, 0, 14)
+VehicleShootLabel.Font = Enum.Font.Gotham
+VehicleShootLabel.Text = "shoot vehicles (pop tires)"
+VehicleShootLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+VehicleShootLabel.TextSize = 11
+VehicleShootLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+VehicleShootToggle.MouseButton1Click:Connect(function()
+    ArrestSettings.ShootVehicles = not ArrestSettings.ShootVehicles
+    if ArrestSettings.ShootVehicles then
+        VehicleShootToggle.BackgroundColor3 = Color3.fromRGB(70, 180, 100)
+        print("🔫 Vehicle shooting enabled - Will shoot at vehicles to pop tires")
+        startVehicleShooting()
+    else
+        VehicleShootToggle.BackgroundColor3 = Color3.fromRGB(60, 65, 80)
+        print("🔫 Vehicle shooting disabled")
+        stopVehicleShooting()
     end
     saveSettings()
 end)
