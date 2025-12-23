@@ -1,5 +1,5 @@
 --[[
-    SFAA - SUPER FAST AUTO ARREST V8.5
+    SFAA - SUPER FAST AUTO ARREST V8.0
     AUTO-ENABLED with instant police team switch
     
     FEATURES:
@@ -122,50 +122,18 @@ getgenv().SFAA_RUNNING = true
 pcall(function() getgenv().SFAA_RUNNING_TS = os.time() end)
 startRunningHeartbeat()
 
--- Safe OnTeleport connection with existence checks
-task.spawn(function()
-    local maxWait = 10
-    local waited = 0
-    
-    -- Wait for LocalPlayer to exist
-    while not LP or not LP.Parent do
-        if waited >= maxWait then
-            warn("⚠️ LocalPlayer not available after " .. maxWait .. "s - skipping OnTeleport setup")
-            return
-        end
-        task.wait(0.5)
-        waited = waited + 0.5
-        LP = Players.LocalPlayer
-    end
-    
-    -- Additional small wait to ensure OnTeleport is available
-    task.wait(1)
-    
-    -- Safe connection with pcall
-    local success, err = pcall(function()
-        if LP and LP.OnTeleport then
-            LP.OnTeleport:Connect(function(State)
-                if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
-                    TeleportCheck = true
-                    local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
-                    local ok = pcall(function()
-                        queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
-                    end)
-                    if ok then
-                        print("✅ SFAA queued for auto-execution in new server!")
-                    else
-                        warn("⚠️ Failed to queue SFAA for next server")
-                    end
-                end
-            end)
-            print("✅ OnTeleport event connected successfully")
+LP.OnTeleport:Connect(function(State)
+    if not TeleportCheck and (queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)) then
+        TeleportCheck = true
+        local queueFunc = queueteleport or queue_on_teleport or (syn and syn.queue_on_teleport)
+        local success = pcall(function()
+            queueFunc("loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()")
+        end)
+        if success then
+            print("✅ SFAA queued for auto-execution in new server!")
         else
-            warn("⚠️ OnTeleport not available - auto-queue disabled")
+            warn("⚠️ Failed to queue SFAA for next server")
         end
-    end)
-    
-    if not success then
-        warn("⚠️ Failed to setup OnTeleport:", err)
     end
 end)
 
@@ -181,7 +149,7 @@ local LP = P.LocalPlayer
 local Camera = W.CurrentCamera
 
 print("\n" .. string.rep("=", 70))
-print("🚔 SFAA V8.5 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
+print("🚔 SFAA V8.0 - AUTO POLICE SWITCHER + MILITARY BASE SPAWNER")
 print(string.rep("=", 70))
 
 -- ================= CONFIG =================
@@ -770,15 +738,7 @@ local ArrestSettings = {
     CoverHighBountyEnabled = true,
     CoverHighBountyWaitDuration = 20, -- seconds to wait for a high-bounty target to leave cover
     CoverHighBountyForceHop = true,  -- if they don't leave cover, force a server hop
-
-    -- Vehicle shooting settings
-    ShootVehicles = true,                    -- Enable/disable vehicle shooting
-    ShootInterval = 0.15,                    -- Time between shots (seconds)
-    ShootRange = 200,                        -- Max range to shoot vehicles (studs)
-    AutoSwitchWeapons = true,                -- Auto-switch between pistol and handcuffs
-    AutoHandcuffSpace = true,                 -- If pistol is not equipped, equip handcuffs and press Space every interval
-    SpacePressInterval = 1.0,                 -- Interval in seconds to press Space when not holding pistol
-}  
+} 
 
 -- Persisted settings file
 local SETTINGS_FILE = "SFAA_settings.json"
@@ -982,14 +942,7 @@ local arrestState = {
     -- Players detected under cover are stored here so we can target them when they leave cover
     coverWatchlist = {},
     noTargetsStartTime = nil,
-    spacePressActive = false,
 } 
-
--- Vehicle shooting runtime state
-local pistolEquipped = false
-local lastPistolShot = 0
-local shootingThread = nil
-local spacePressThread = nil
 
 --// MAIN CONNECTIONS //--
 local mainConnection = nil
@@ -1427,15 +1380,6 @@ local function isPlayerUnderCover(player)
     return false
 end
 
--- Aim camera at target position for shooting
-local function aimCameraAt(position)
-    pcall(function()
-        Camera.CFrame = CFrame.new(Camera.CFrame.Position, position)
-    end)
-end
-
-
-
 local function findNearestCriminal()
     local char = LP.Character
     if not char then return nil end
@@ -1706,143 +1650,6 @@ local function equipHandcuffs(retries)
     return false
 end
 
--- Pistol equip and vehicle-shooting helpers
-local function equipPistol(retries)
-    retries = retries or 3
-    for i = 1, retries do
-        local currentTime = tick()
-        if currentTime - arrestState.lastEquipAttempt < 0.45 then
-            task.wait(0.45)
-        end
-        arrestState.lastEquipAttempt = tick()
-        local ok = false
-        pcall(function()
-            local args = {true}
-            local folder = LP:FindFirstChild("Folder")
-            if folder then
-                local pistol = folder:FindFirstChild("Pistol")
-                if pistol and pistol:FindFirstChild("InventoryEquipRemote") then
-                    pistol.InventoryEquipRemote:FireServer(unpack(args))
-                    ok = true
-                else
-                    -- Try direct remote if structure differs
-                    local rem = folder:FindFirstChildWhichIsA("RemoteEvent") or folder:FindFirstChild("InventoryEquipRemote")
-                    if rem and rem.FireServer then
-                        rem:FireServer(unpack(args))
-                        ok = true
-                    end
-                end
-            end
-        end)
-        if ok then
-            pistolEquipped = true
-            arrestState.handcuffsEquipped = false
-            return true
-        end
-        task.wait(0.2)
-    end
-    warn("⚠️ equipPistol: failed to equip pistol after " .. retries .. " attempts")
-    return false
-end
-
-local function isTargetInVehicle()
-    if not arrestState.targetPlayer then return false end
-    local char = arrestState.targetPlayer.Character
-    if not char then return false end
-    
-    local hum = char:FindFirstChild("Humanoid")
-    if not hum then return false end
-    
-    return hum.Sit or hum.SeatPart ~= nil
-end
-
-local function shootAtTarget()
-    if not ArrestSettings.ShootVehicles then return end
-    if not arrestState.targetPlayer then return end
-    if not isTargetInVehicle() then return end
-    
-    local now = tick()
-    if now - lastPistolShot < (ArrestSettings.ShootInterval or 0.15) then
-        return
-    end
-    
-    local char = LP.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    
-    local targetRoot = arrestState.targetPlayer.Character and arrestState.targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not targetRoot then return end
-    
-    local distance = (root.Position - targetRoot.Position).Magnitude
-    
-    -- IMPORTANT: If too close, switch to handcuffs and stop shooting
-    if distance < 50 then
-        if pistolEquipped then
-            print("🔫 Close enough - switching to handcuffs")
-            equipHandcuffs()
-            pistolEquipped = false
-        end
-        return
-    end
-    
-    if distance > (ArrestSettings.ShootRange or 200) then return end
-    
-    -- Ensure pistol is equipped
-    if not pistolEquipped then
-        equipPistol()
-        task.wait(0.3)
-        if not pistolEquipped then return end
-    end
-    
-    -- Aim camera at target vehicle
-    local aimPos = targetRoot.Position
-    aimCameraAt(aimPos)
-    
-    -- Fire pistol
-    pcall(function()
-        local folder = LP:FindFirstChild("Folder")
-        if folder then
-            local pistol = folder:FindFirstChild("Pistol")
-            if pistol then
-                local shootRemote = pistol:FindFirstChild("Shoot") or 
-                                  pistol:FindFirstChild("Fire") or 
-                                  pistol:FindFirstChild("RemoteEvent") or
-                                  pistol:FindFirstChildWhichIsA("RemoteEvent")
-                
-                if shootRemote and shootRemote.FireServer then
-                    pcall(function() shootRemote:FireServer(aimPos) end)
-                    lastPistolShot = now
-                end
-            end
-        end
-    end)
-end
-
-local function startVehicleShooting()
-    if shootingThread then return end
-    if not ArrestSettings.ShootVehicles then return end
-    
-    shootingThread = task.spawn(function()
-        while ArrestSettings.ShootVehicles and ArrestSettings.Enabled do
-            if arrestState.targetPlayer and isTargetInVehicle() then
-                if arrestState.phase == "FLYING" or arrestState.phase == "DROPPING" then
-                    shootAtTarget()
-                end
-            end
-            task.wait(ArrestSettings.ShootInterval or 0.15)
-        end
-    end)
-end
-
-local function stopVehicleShooting()
-    if shootingThread then
-        task.cancel(shootingThread)
-        shootingThread = nil
-    end
-    pistolEquipped = false
-end
-
 local function getVehicle()
     local char = LP.Character
     if not char then return nil end
@@ -1958,74 +1765,19 @@ local function findVehicleSeat(vehicle)
     return nil
 end
 
--- Check if handcuffs are ACTUALLY equipped and ready
-local function areHandcuffsReady()
-    if not LP.Character then return false end
-    -- Check tool in hand
-    local tool = LP.Character:FindFirstChildOfClass("Tool")
-    if tool and tool.Name == "Handcuffs" then
-        arrestState.handcuffsEquipped = true
-        return true
-    end
-    -- Check backpack
-    local backpack = LP:FindFirstChild("Backpack")
-    if backpack then
-        local cuffs = backpack:FindFirstChild("Handcuffs")
-        if not cuffs then
-            arrestState.handcuffsEquipped = false
-            return false
-        end
-    end
-    return arrestState.handcuffsEquipped == true
-end
-
--- IMPROVED: exitVehicle with smart handcuff waiting
 local function exitVehicle()
     local char = LP.Character
     if not char then return false end
     local hum = char:FindFirstChild("Humanoid")
     if not hum then return false end
-    
     print("🚪 Exiting vehicle...")
-    
-    -- Method 1: Standard exit
     pcall(function()
         hum.Sit = false
         hum.Jump = true
     end)
     task.wait(0.3)
-    
-    -- Method 2: Force unsit if still in vehicle
-    if hum.Sit or hum.SeatPart then
-        print("⚠️ Still in vehicle - forcing exit...")
-        pcall(function()
-            if hum.SeatPart then
-                hum.SeatPart:Sit(nil)
-            end
-            hum.Sit = false
-            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-        end)
-        task.wait(0.2)
-    end
-    
-    -- Method 3: Teleport slightly up if still stuck
-    if hum.Sit or hum.SeatPart then
-        print("⚠️ Emergency teleport to exit vehicle")
-        local root = char:FindFirstChild("HumanoidRootPart")
-        if root then
-            pcall(function()
-                root.CFrame = root.CFrame + Vector3.new(0, 10, 0)
-                root.AssemblyLinearVelocity = Vector3.zero
-                hum.Sit = false
-            end)
-            task.wait(0.2)
-        end
-    end
-    
     arrestState.inVehicle = false
     arrestState.currentVehicle = nil
-    
-    -- Reset camera
     pcall(function()
         local pHum = LP.Character and LP.Character:FindFirstChild("Humanoid")
         if pHum then
@@ -2033,90 +1785,26 @@ local function exitVehicle()
             Camera.CameraSubject = pHum
         end
     end)
-    
-    -- CRITICAL FIX: Wait for handcuffs before allowing E spam
-    print("🔫 Waiting for handcuffs to equip...")
-    
-    local equipStartTime = tick()
-    local maxEquipWait = 3 -- Maximum 3 seconds to wait for handcuffs
-    
-    -- Try to equip handcuffs multiple times
-    for i = 1, 5 do
-        if areHandcuffsReady() then
-            print("✅ Handcuffs ready! (attempt " .. i .. ")")
-            break
-        end
-        equipHandcuffs()
-        task.wait(0.3)
-        if tick() - equipStartTime > maxEquipWait then
-            print("⚠️ Handcuff equip timeout - proceeding anyway")
-            break
-        end
+    if not arrestState.handcuffsEquipped then
+        pcall(function()
+            for i = 1, 3 do
+                local ok = pcall(function()
+                    local args = { true }
+                    game:GetService("Players").LocalPlayer:WaitForChild("Folder"):WaitForChild("Handcuffs"):WaitForChild("InventoryEquipRemote"):FireServer(unpack(args))
+                end)
+                if ok then
+                    arrestState.handcuffsEquipped = true
+                    arrestState.lastEquipAttempt = tick()
+                    print("🔫 Equipping handcuffs (exit attempt " .. i .. ")")
+                    break
+                else
+                    print("⚠️ Equip attempt failed (exit) attempt " .. i)
+                end
+                task.wait(0.2)
+            end
+        end)
     end
-    
-    -- Ensure pistol is unequipped
-    pistolEquipped = false
-    
-    print("✅ Vehicle exit complete")
     return true
-end
-
--- Attempts to pop vehicle tires using local remotes (best-effort)
-local function popVehicleTires(targetPlayer)
-    if not targetPlayer or not targetPlayer.Character then return false end
-    
-    -- Find target's vehicle
-    local vehiclesFolder = workspace:FindFirstChild("Vehicles")
-    if not vehiclesFolder then return false end
-    
-    local targetVehicle = nil
-    for _, vehicle in pairs(vehiclesFolder:GetChildren()) do
-        if vehicle:IsA("Model") then
-            for _, obj in pairs(vehicle:GetChildren()) do
-                if obj.Name:match("^_VehicleState_") then
-                    local playerName = obj.Name:gsub("^_VehicleState_", "")
-                    if playerName:lower() == targetPlayer.Name:lower() then
-                        targetVehicle = vehicle
-                        break
-                    end
-                end
-            end
-        end
-        if targetVehicle then break end
-    end
-    
-    if not targetVehicle then return false end
-    
-    -- Try to pop tires using remotes found in LocalPlayer.App
-    local success = pcall(function()
-        local app = LP:FindFirstChild("App")
-        if app then
-            for _, remote in pairs(app:GetDescendants()) do
-                if remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction") then
-                    pcall(function()
-                        if remote:IsA("RemoteEvent") then
-                            remote:FireServer(targetVehicle)
-                        else
-                            remote:InvokeServer(targetVehicle)
-                        end
-                    end)
-                    for _, part in pairs(targetVehicle:GetDescendants()) do
-                        if part.Name:lower():match("wheel") or part.Name:lower():match("tire") then
-                            pcall(function()
-                                if remote:IsA("RemoteEvent") then
-                                    remote:FireServer(part)
-                                else
-                                    remote:InvokeServer(part)
-                                end
-                            end)
-                        end
-                    end
-                end
-            end
-        end
-    end)
-    
-    return success
 end
 
 local eCycleThread = nil
@@ -2149,22 +1837,14 @@ local function startECycle()
     eCycleThread = task.spawn(function()
         while arrestState.eHoldActive do
             if arrestState.phase == "ARRESTING" and arrestState.targetPlayer then
-                -- Only spam E if handcuffs are actually equipped
-                if areHandcuffsReady() then
+                VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                task.wait(1.5)
+                VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+                for i = 1, 5 do
                     VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                    task.wait(1.5)
+                    task.wait(0.05)
                     VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-                    for i = 1, 5 do
-                        VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                        task.wait(0.05)
-                        VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-                        task.wait(0.05)
-                    end
-                else
-                    -- Handcuffs not ready - wait and attempt to equip
-                    print("⚠️ E-cycle paused - handcuffs not equipped")
-                    equipHandcuffs()
-                    task.wait(0.5)
+                    task.wait(0.05)
                 end
             else
                 task.wait(0.1)
@@ -2180,37 +1860,6 @@ local function stopECycle()
         eCycleThread = nil
     end
     VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-end
-
-local function startAutoSpaceLoop()
-    if arrestState.spacePressActive then return end
-    arrestState.spacePressActive = true
-    spacePressThread = task.spawn(function()
-        while arrestState.spacePressActive do
-            if ArrestSettings.Enabled and not pistolEquipped then
-                -- Ensure handcuffs are equipped when pistol is not
-                pcall(function() equipHandcuffs() end)
-                -- Press Space once
-                pcall(function()
-                    VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-                    task.wait(0.05)
-                    VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-                end)
-                task.wait(ArrestSettings.SpacePressInterval or 1)
-            else
-                task.wait(0.5)
-            end
-        end
-    end)
-end
-
-local function stopAutoSpaceLoop()
-    arrestState.spacePressActive = false
-    if spacePressThread then
-        task.cancel(spacePressThread)
-        spacePressThread = nil
-    end
-    pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game) end)
 end
 
 local function getRoot(model)
@@ -2347,135 +1996,43 @@ local function performInstantDrop(targetRoot, descendY, preferFullXZ)
     return success
 end
 
--- Set proper network ownership for vehicle parts
-local function setVehicleNetworkOwnership(vehicle)
-    if not vehicle then return false end
-    local success = pcall(function()
-        local mainPart = vehicle:FindFirstChild("Engine") or vehicle:FindFirstChild("Body") or vehicle.PrimaryPart or vehicle:FindFirstChildWhichIsA("BasePart")
-        if mainPart then
-            if mainPart:CanSetNetworkOwnership() then
-                pcall(function() mainPart:SetNetworkOwner(LP) end)
-                print("✅ Claimed network ownership of vehicle")
-            end
-            for _, part in ipairs(vehicle:GetDescendants()) do
-                if part:IsA("BasePart") and part:CanSetNetworkOwnership() then
-                    pcall(function() part:SetNetworkOwner(LP) end)
-                end
-            end
-        end
-    end)
-    return success
-end
-
--- Velocity-based vehicle movement (prevents lag-back)
-local function flyVehicleToPosition(vehicle, targetPos, speed)
-    if not vehicle then return false end
-    local root = getRoot(vehicle)
-    if not root then return false end
-    speed = speed or ArrestSettings.VehicleFlySpeed
-
-    -- Claim ownership first
-    pcall(function() setVehicleNetworkOwnership(vehicle) end)
-
-    local currentPos = root.Position
-    local distance = (targetPos - currentPos).Magnitude
-    if distance < 5 then
-        pcall(function()
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-            local bv = root:FindFirstChildOfClass("BodyVelocity")
-            if bv then bv:Destroy() end
-        end)
-        return true
-    end
-
-    local direction = (targetPos - currentPos).Unit
-    pcall(function()
-        root.Anchored = false
-        root.CFrame = CFrame.new(currentPos, currentPos + direction)
-        root.AssemblyLinearVelocity = direction * speed
-        root.AssemblyAngularVelocity = Vector3.zero
-        -- BodyVelocity backup
-        local bodyVel = root:FindFirstChildOfClass("BodyVelocity")
-        if not bodyVel then
-            bodyVel = Instance.new("BodyVelocity")
-            bodyVel.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-            bodyVel.P = 1250
-            bodyVel.Parent = root
-        end
-        bodyVel.Velocity = direction * speed
-    end)
-
-    return false
-end
-
--- Vehicle update rate limiter (prevent server rejection)
-local lastVehicleUpdate = 0
-local vehicleUpdateInterval = 0.05 -- 50ms between vehicle updates (20 updates/sec max)
-local function canUpdateVehicle()
-    local now = tick()
-    if now - lastVehicleUpdate < vehicleUpdateInterval then return false end
-    lastVehicleUpdate = now
-    return true
-end
-
--- Vehicle-aware flyToPosition that uses vehicle-specific method when in a vehicle
 local function flyToPosition(targetPos, speed)
     local char = LP.Character
     if not char then return false end
     local veh = getVehicle()
-    local isInVeh = veh ~= nil
-
-    if isInVeh then
-        if not canUpdateVehicle() then return false end
-        return flyVehicleToPosition(veh, targetPos, speed)
-    else
-        -- Character flying (original behavior)
-        local actualSpeed = speed or ArrestSettings.CharacterFlySpeed
-        local root = char:FindFirstChild("HumanoidRootPart")
-        if not root then return false end
+    local actualSpeed = veh and ArrestSettings.VehicleFlySpeed or ArrestSettings.CharacterFlySpeed
+    local root = veh and getRoot(veh) or char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    if not veh then
         local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then pcall(function() hum.PlatformStand = true end) end
-        pcall(function() root.Anchored = false end)
-        local currentPos = root.Position
-        local distance = (targetPos - currentPos).Magnitude
-        if distance < 5 then
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-            return true
+        if hum then
+            pcall(function()
+                hum.PlatformStand = true
+            end)
         end
-        local direction = (targetPos - currentPos).Unit
-        pcall(function()
-            root.CFrame = CFrame.new(currentPos, currentPos + direction)
-            root.AssemblyLinearVelocity = direction * actualSpeed
-            root.AssemblyAngularVelocity = Vector3.zero
-        end)
-        return false
     end
-end
-
--- Diagnostic helper for vehicle state
-local function diagnoseVehicleState()
-    local veh = getVehicle()
-    if not veh then print("❌ No vehicle detected") return end
-    local root = getRoot(veh)
-    if not root then print("❌ No vehicle root part") return end
-    print("\n" .. string.rep("=", 50))
-    print("🚗 VEHICLE DIAGNOSTICS")
-    print(string.rep("=", 50))
-    print("Vehicle Name: " .. veh.Name)
-    print("Root Part: " .. root.Name)
-    print("Position: " .. tostring(root.Position))
-    print("Velocity: " .. tostring(root.AssemblyLinearVelocity))
-    print("Anchored: " .. tostring(root.Anchored))
-    local hasOwnership = root:CanSetNetworkOwnership()
-    print("Can Set Ownership: " .. tostring(hasOwnership))
-    if hasOwnership then
-        pcall(function() root:SetNetworkOwner(LP); print("✅ Set network owner to local player") end)
-    else
-        print("⚠️ Cannot set network ownership (might be locked)")
+    pcall(function()
+        root.Anchored = false
+        if veh then
+            if root:CanSetNetworkOwnership() then
+                root:SetNetworkOwner(LP)
+            end
+        end
+    end)
+    local currentPos = root.Position
+    local distance = (targetPos - currentPos).Magnitude
+    if distance < 5 then
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        return true
     end
-    print(string.rep("=", 50) .. "\n")
+    local direction = (targetPos - currentPos).Unit
+    pcall(function()
+        root.CFrame = CFrame.new(currentPos, currentPos + direction)
+        root.AssemblyLinearVelocity = direction * actualSpeed
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+    return false
 end
 
 local function flyHorizontalToPosition(targetPos, maintainHeight)
@@ -3026,23 +2583,12 @@ local mainUpdateInterval = 0.03
 
 local function startArrestSystem()
     if mainConnection then return end
-    print("🚨 SFAA Started - V8.5")
+    print("🚨 SFAA Started - V8.0")
     print("💰 Bounty Filter: " .. (ArrestSettings.BountyFilterEnabled and "ACTIVE" or "DISABLED") .. " - Min bounty: " .. ArrestSettings.BountyThreshold)
     print("🎯 Target Mode: " .. ArrestSettings.TargetMode)
     print("🔄 Server Hop: " .. (ArrestSettings.ServerHopEnabled and "ENABLED (targets 4-8 slots)" or "DISABLED"))
     displayAllBounties()
     
-    -- Start vehicle shooting thread
-    print("🔫 Vehicle Shooting: " .. (ArrestSettings.ShootVehicles and "ENABLED" or "DISABLED"))
-    if ArrestSettings.ShootVehicles then
-        startVehicleShooting()
-    end
-
-    -- Start auto handcuff + Space press loop if enabled
-    if ArrestSettings.AutoHandcuffSpace then
-        startAutoSpaceLoop()
-    end
-
     mainConnection = R.Heartbeat:Connect(function()
         if not ArrestSettings.Enabled then
             if mainConnection then
@@ -3570,24 +3116,6 @@ local function startArrestSystem()
                 print("✈️ PHASE: Flying (speed: " .. speed .. ")")
             end
         elseif arrestState.phase == "FLYING" then
-    if not isTargetValid(arrestState.targetPlayer) then
-        arrestState.phase = "SCANNING"
-        arrestState.targetPlayer = nil
-        return
-    end
-
-    -- Auto-switch to pistol if target is in vehicle and shooting is enabled
-    if ArrestSettings.ShootVehicles and ArrestSettings.AutoSwitchWeapons then
-        if isTargetInVehicle() and not pistolEquipped then
-            print("🔫 Target in vehicle - switching to pistol")
-            equipPistol()
-        elseif not isTargetInVehicle() and pistolEquipped then
-            -- Switch back to handcuffs when target exits vehicle
-            print("🔫 Target exited vehicle - switching to handcuffs")
-            equipHandcuffs()
-            pistolEquipped = false
-        end
-    end
             if not isTargetValid(arrestState.targetPlayer) then
                 arrestState.phase = "SCANNING"
                 arrestState.targetPlayer = nil
@@ -3626,121 +3154,83 @@ local function startArrestSystem()
                 end
             end
         elseif arrestState.phase == "DROPPING" then
-    if not isTargetValid(arrestState.targetPlayer) then
-        arrestState.phase = "SCANNING"
-        arrestState.targetPlayer = nil
-        stopECycle()
-        return
-    end
-    
-    local targetRoot = arrestState.targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not targetRoot then
-        arrestState.phase = "SCANNING"
-        arrestState.targetPlayer = nil
-        stopECycle()
-        return
-    end
-    
-    local distance = (root.Position - targetRoot.Position).Magnitude
-    
-    -- IMPROVED: Check if target is in vehicle and handle accordingly
-    local targetInVehicle = isTargetInVehicle()
-    
-    if targetInVehicle then
-        -- Target is in vehicle
-        if distance < 50 then
-            -- Close enough - exit our vehicle and prepare to arrest
-            print("🚗 Target in vehicle but close - exiting to arrest")
-            if isInVehicle() then
-                exitVehicle()
-                task.wait(0.5)
+            if not isTargetValid(arrestState.targetPlayer) then
+                arrestState.phase = "SCANNING"
+                arrestState.targetPlayer = nil
+                stopECycle()
+                return
             end
-            
-            -- Switch to handcuffs
-            if pistolEquipped or not arrestState.handcuffsEquipped then
-                equipHandcuffs()
-                pistolEquipped = false
-                task.wait(0.2)
+            local targetRoot = arrestState.targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if not targetRoot then
+                arrestState.phase = "SCANNING"
+                arrestState.targetPlayer = nil
+                stopECycle()
+                return
             end
-            
-            -- Optional: Try to pop their tires
-            if ArrestSettings.ShootVehicles then
-                pcall(function() popVehicleTires(arrestState.targetPlayer) end)
-            end
-        else
-            -- Still far - continue shooting while in vehicle
-            if ArrestSettings.ShootVehicles then
-                shootAtTarget()
-            end
-        end
-    else
-        -- Target NOT in vehicle - switch to handcuffs if we have pistol
-        if pistolEquipped then
-            print("🔫 Target exited vehicle - switching to handcuffs")
-            equipHandcuffs()
-            pistolEquipped = false
-            task.wait(0.2)
-        end
-    end
-    
-    -- Exit our vehicle if too close
-    if distance < 100 and isInVehicle() then
-        print("🚪 Exiting vehicle (close to target)")
-        exitVehicle()
-        task.wait(0.5)
-    end
-    
-    -- Rest of dropping logic continues...
-    local groundHeight = findGroundHeight(targetRoot.Position)
-    local targetHeight = math.max(targetRoot.Position.Y + 8, groundHeight + 6)
-    local descendY = targetHeight
-    local horizontalXZDist = Vector3.new(root.Position.X - targetRoot.Position.X, 0, root.Position.Z - targetRoot.Position.Z).Magnitude
-    
-    if arrestState.justTeleportedAbove then
-        print("⚡ Performing instant drop to target location (was teleported above)")
-        performInstantDrop(targetRoot, descendY, true)
-        arrestState.justTeleportedAbove = nil
-    elseif horizontalXZDist <= (ArrestSettings.DescentAlignmentThreshold or 8) or arrestState.forceInstantDrop then
-        print("⚡ Instant vertical drop to target Y (preserving X,Z)")
-        performInstantDrop(targetRoot, descendY, false)
-        arrestState.forceInstantDrop = nil
-    else
-        if horizontalXZDist < (ArrestSettings.ReturnToFlyDistance or 500) then
-            flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, descendY, targetRoot.Position.Z), descendY)
-        else
-            local nearby, ndist = findNearbyCriminalAround(targetRoot.Position, 75)
-            if nearby then
-                print("🔁 Nearby criminal found (" .. nearby.Name .. ") within 75 studs - engaging directly at low altitude")
-                arrestState.targetPlayer = nearby
-                local altRoot = nearby.Character and nearby.Character:FindFirstChild("HumanoidRootPart")
-                if altRoot then
-                    flyHorizontalToPosition(Vector3.new(altRoot.Position.X, descendY, altRoot.Position.Z), descendY)
+            local distance = (root.Position - targetRoot.Position).Magnitude
+            if distance < 100 and isInVehicle() then
+                print("🚪 Exiting vehicle")
+                if arrestState.originalCameraSubject then
+                    pcall(function()
+                        Camera.CameraType = arrestState.originalCameraType or Enum.CameraType.Custom
+                        Camera.CameraSubject = arrestState.originalCameraSubject
+                    end)
                 end
-            else
-                teleportVerticalTo(ArrestSettings.FlyAltitude)
-                flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, ArrestSettings.FlyAltitude, targetRoot.Position.Z), ArrestSettings.FlyAltitude)
+                exitVehicle()
+                task.wait(1)
+                if not arrestState.handcuffsEquipped then
+                    print("🔫 Equipping handcuffs after vehicle exit...")
+                    equipHandcuffs()
+                    task.wait(0.2)
+                    equipHandcuffs()
+                    task.wait(0.2)
+                    equipHandcuffs()
+                end
             end
-        end
-    end
-    
-    -- Transition to arresting when close enough
-    if distance < ArrestSettings.ArrestRange then
-        arrestState.phase = "ARRESTING"
-        print("🚨 PHASE: ARRESTING!")
-        
-        -- Ensure handcuffs equipped
-        if not arrestState.handcuffsEquipped or pistolEquipped then
-            print("🔫 Equipping handcuffs for arrest...")
-            equipHandcuffs()
-            pistolEquipped = false
-            task.wait(0.2)
-            equipHandcuffs()
-            task.wait(0.2)
-            equipHandcuffs()
-        end
-        
-        startECycle()
-    end
+            local groundHeight = findGroundHeight(targetRoot.Position)
+            local targetHeight = math.max(targetRoot.Position.Y + 8, groundHeight + 6)
+            local descendY = targetHeight
+            local horizontalXZDist = Vector3.new(root.Position.X - targetRoot.Position.X, 0, root.Position.Z - targetRoot.Position.Z).Magnitude
+            if arrestState.justTeleportedAbove then
+                print("⚡ Performing instant drop to target location (was teleported above)")
+                performInstantDrop(targetRoot, descendY, true)
+                arrestState.justTeleportedAbove = nil
+            elseif horizontalXZDist <= (ArrestSettings.DescentAlignmentThreshold or 8) or arrestState.forceInstantDrop then
+                print("⚡ Instant vertical drop to target Y (preserving X,Z)")
+                performInstantDrop(targetRoot, descendY, false)
+                arrestState.forceInstantDrop = nil
+            else
+                if horizontalXZDist < (ArrestSettings.ReturnToFlyDistance or 500) then
+                    flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, descendY, targetRoot.Position.Z), descendY)
+                else
+                    local nearby, ndist = findNearbyCriminalAround(targetRoot.Position, 75)
+                    if nearby then
+                        print("🔁 Nearby criminal found (" .. nearby.Name .. ") within 75 studs - engaging directly at low altitude")
+                        arrestState.targetPlayer = nearby
+                        local altRoot = nearby.Character and nearby.Character:FindFirstChild("HumanoidRootPart")
+                        if altRoot then
+                            flyHorizontalToPosition(Vector3.new(altRoot.Position.X, descendY, altRoot.Position.Z), descendY)
+                        end
+                    else
+                        -- Suppressed noisy console print about target moving far away
+                        teleportVerticalTo(ArrestSettings.FlyAltitude)
+                        flyHorizontalToPosition(Vector3.new(targetRoot.Position.X, ArrestSettings.FlyAltitude, targetRoot.Position.Z), ArrestSettings.FlyAltitude)
+                    end
+                end
+            end
+            if distance < ArrestSettings.ArrestRange then
+                arrestState.phase = "ARRESTING"
+                print("🚨 PHASE: ARRESTING!")
+                if not arrestState.handcuffsEquipped then
+                    print("🔫 Equipping handcuffs...")
+                    equipHandcuffs()
+                    task.wait(0.2)
+                    equipHandcuffs()
+                    task.wait(0.2)
+                    equipHandcuffs()
+                end
+                startECycle()
+            end
         elseif arrestState.phase == "ARRESTING" then
             if not isTargetValid(arrestState.targetPlayer) then
                 print("✅ Target arrested or died!")
@@ -3798,12 +3288,6 @@ local function stopArrestSystem()
     end)
     pcall(function()
         stopEquipSpam()
-    end)
-    pcall(function()
-        stopVehicleShooting()
-    end)
-    pcall(function()
-        stopAutoSpaceLoop()
     end)
     pcall(function()
         local char = LP.Character
@@ -3890,7 +3374,7 @@ Version.BackgroundTransparency = 1
 Version.Position = UDim2.new(0, 15, 0, 28)
 Version.Size = UDim2.new(1, -30, 0, 16)
 Version.Font = Enum.Font.Gotham
-Version.Text = "Super Fast Auto Arrest v8.5"
+Version.Text = "Super Fast Auto Arrest v8.0"
 Version.TextColor3 = Color3.fromRGB(140, 150, 170)
 Version.TextSize = 11
 Version.TextXAlignment = Enum.TextXAlignment.Left
@@ -4247,7 +3731,7 @@ OtherSection.Parent = MainFrame
 OtherSection.BackgroundColor3 = Color3.fromRGB(20, 24, 32)
 OtherSection.BorderSizePixel = 0
 OtherSection.Position = UDim2.new(0, 15, 0, 412)
-OtherSection.Size = UDim2.new(1, -30, 0, 75)  -- increased to fit Vehicle Shoot toggle
+OtherSection.Size = UDim2.new(1, -30, 0, 60)
 
 local OtherSectionCorner = Instance.new("UICorner")
 OtherSectionCorner.CornerRadius = UDim.new(0, 8)
@@ -4441,45 +3925,6 @@ ServerHopToggle.MouseButton1Click:Connect(function()
     saveSettings()
 end)
 
--- Vehicle Shooting Toggle
-local VehicleShootToggle = Instance.new("TextButton")
-VehicleShootToggle.Parent = OtherSection
-VehicleShootToggle.BackgroundColor3 = ArrestSettings.ShootVehicles and Color3.fromRGB(70, 180, 100) or Color3.fromRGB(60, 65, 80)
-VehicleShootToggle.Position = UDim2.new(0, 12, 0, 20)
-VehicleShootToggle.Size = UDim2.new(0, 14, 0, 14)
-VehicleShootToggle.Text = ""
-VehicleShootToggle.BorderSizePixel = 0
-VehicleShootToggle.AutoButtonColor = false
-
-local VehicleShootCorner = Instance.new("UICorner")
-VehicleShootCorner.CornerRadius = UDim.new(0, 3)
-VehicleShootCorner.Parent = VehicleShootToggle
-
-local VehicleShootLabel = Instance.new("TextLabel")
-VehicleShootLabel.Parent = OtherSection
-VehicleShootLabel.BackgroundTransparency = 1
-VehicleShootLabel.Position = UDim2.new(0, 32, 0, 18)
-VehicleShootLabel.Size = UDim2.new(1, -44, 0, 14)
-VehicleShootLabel.Font = Enum.Font.Gotham
-VehicleShootLabel.Text = "shoot vehicles (pop tires)"
-VehicleShootLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
-VehicleShootLabel.TextSize = 11
-VehicleShootLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-VehicleShootToggle.MouseButton1Click:Connect(function()
-    ArrestSettings.ShootVehicles = not ArrestSettings.ShootVehicles
-    if ArrestSettings.ShootVehicles then
-        VehicleShootToggle.BackgroundColor3 = Color3.fromRGB(70, 180, 100)
-        print("🔫 Vehicle shooting enabled - Will shoot at vehicles to pop tires")
-        startVehicleShooting()
-    else
-        VehicleShootToggle.BackgroundColor3 = Color3.fromRGB(60, 65, 80)
-        print("🔫 Vehicle shooting disabled")
-        stopVehicleShooting()
-    end
-    saveSettings()
-end)
-
 local lastUIUpdate = 0
 spawn(function()
     while true do
@@ -4526,7 +3971,7 @@ spawn(function()
     end
 end)
 
-print("✅ SFAA V8.5 Loaded Successfully!")
+print("✅ SFAA V8.0 Loaded Successfully!")
 print("📱 Modern clean GUI active")
 print("⚡ All features operational")
 print("💰 Bounty filter: ENABLED (Min: $" .. ArrestSettings.BountyThreshold .. ")")
