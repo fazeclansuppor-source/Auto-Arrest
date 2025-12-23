@@ -736,7 +736,7 @@ local ArrestSettings = {
     LoopDeathServerHop = true,
     -- High-bounty cover behavior: wait for covered high-bounty players before hopping
     CoverHighBountyEnabled = true,
-    CoverHighBountyWaitDuration = 20, -- seconds to wait for a high-bounty target to leave cover
+    CoverHighBountyWaitDuration = 30, -- seconds to wait for a high-bounty target to leave cover
     CoverHighBountyForceHop = true,  -- if they don't leave cover, force a server hop
 } 
 
@@ -1097,6 +1097,12 @@ local function deepCleanupBeforeHop()
         Camera.FieldOfView = 70
     end)
     
+    -- Reset vehicle spawn cooldown for the next server (cooldowns are server-specific)
+    pcall(function()
+        ArrestSettings.LastCamaroSpawn = 0
+        print("🔁 Reset vehicle spawn cooldown for next server")
+    end)
+
     -- Save all persistent data
     print("💾 Saving persistent data...")
     pcall(saveSettings)
@@ -1380,7 +1386,8 @@ local function isPlayerUnderCover(player)
     return false
 end
 
-local function findNearestCriminal()
+local function findNearestCriminal(allowBelowThreshold)
+    allowBelowThreshold = allowBelowThreshold or false
     local char = LP.Character
     if not char then return nil end
     local root = char:FindFirstChild("HumanoidRootPart")
@@ -1409,9 +1416,11 @@ local function findNearestCriminal()
                         arrestState.coverWatchlist[player.UserId] = tick()
                     end)
                 else
+                    -- When waiting on a high-bounty cover candidate, allow targeting players
+                    -- with bounties below the configured threshold (so we don't sit idle).
                     if ArrestSettings.BountyFilterEnabled then
                         local b = getPlayerBounty(player)
-                        if b < ArrestSettings.BountyThreshold then
+                        if b < ArrestSettings.BountyThreshold and not allowBelowThreshold then
                             if b == 0 then
                                 print("⚠️ Skipping " .. player.Name .. " - no bounty")
                             else
@@ -2194,6 +2203,12 @@ local function cleanupBeforeServerHop()
         coverWatchlist = {},
     }
 
+    -- Reset vehicle spawn cooldown for the next server (cooldowns are server-specific)
+    pcall(function()
+        ArrestSettings.LastCamaroSpawn = 0
+        print("🔁 Reset vehicle spawn cooldown for next server")
+    end)
+
     -- Save data
     pcall(saveSettings)
     pcall(saveEarnings)
@@ -2772,12 +2787,13 @@ local function startArrestSystem()
             end
             local underCover = isPlayerUnderCover(arrestState.targetPlayer)
             if underCover then
+                local covDur = (ArrestSettings and ArrestSettings.CoverHighBountyWaitDuration) or 30
                 if not arrestState.targetCoverStart then
                     arrestState.targetCoverStart = tick()
-                    print("⚠️ Target went under cover - waiting 8s for them to return...")
+                    print("⚠️ Target went under cover - waiting " .. covDur .. "s for them to return (may target lower-bounty players while waiting)...")
                 else
-                    if tick() - arrestState.targetCoverStart >= 8 then
-                        print("⏳ Target remained under cover for 8s - retargeting.")
+                    if tick() - arrestState.targetCoverStart >= covDur then
+                        print("⏳ Target remained under cover for " .. covDur .. "s - retargeting.")
                         arrestState.recentTargets[arrestState.targetPlayer.UserId] = tick() + 10
                         arrestState.phase = "SCANNING"
                         arrestState.targetPlayer = nil
@@ -2799,7 +2815,7 @@ local function startArrestSystem()
             if not arrestState.targetPlayer or not isTargetValid(arrestState.targetPlayer) then
                 pcall(function() stopECycle() end)
                 arrestState.handcuffsEquipped = false
-                local newTarget, distance = findNearestCriminal()
+                local newTarget, distance = findNearestCriminal(arrestState.coverWaitPlayer ~= nil)
                 local fromWatch = false
                 if not newTarget then
                     local wp, wdist = getUncoveredWatchedPlayer()
@@ -2839,7 +2855,7 @@ local function startArrestSystem()
                     end
                 else
                     -- Handle high-bounty players who are under cover: wait for them briefly before hopping
-                    local covDur = (ArrestSettings and ArrestSettings.CoverHighBountyWaitDuration) or 20
+                    local covDur = (ArrestSettings and ArrestSettings.CoverHighBountyWaitDuration) or 30
                     local covEnabled = (ArrestSettings and ArrestSettings.CoverHighBountyEnabled) ~= false
                     if not newTarget then
                         if arrestState.coverWaitPlayer then
